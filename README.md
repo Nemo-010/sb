@@ -226,6 +226,13 @@ Each run gets its own `SB_HOME` under a temp dir and removes it on exit; the
 real one is never touched. `--install` also verifies idempotency, hermeticity,
 that the install leaves a runnable `sb`, and that a tampered binary is detected.
 
+## Changing it
+
+[`docs/architecture.md`](docs/architecture.md) explains the layout, the design
+decisions worth keeping, and how to add an engine or move a pin without
+touching logic. [`docs/corpus.md`](docs/corpus.md) is the index of the
+measurement corpus the engine choice comes from.
+
 ## Notes and limits
 
 * The measurements behind the engine choice are in **[RESEARCH.md](RESEARCH.md)**:
