@@ -1,0 +1,1746 @@
+#!/bin/sh
+# sb - a working single-binary headless browser, in one command.
+#
+# Copyright (c) 2026 Ajam
+# SPDX-License-Identifier: 0BSD
+#
+# POSIX sh, no dependencies beyond curl (or wget), tar and a sha256 tool.
+# Everything sb installs lives under $SB_HOME. Nothing outside it is written.
+#
+#   curl -fsSL https://raw.githubusercontent.com/Nemo-010/sb/main/sb | sh -s -- install
+#   sb get https://example.com
+#
+set -u
+
+SB_VERSION="0.1.0"
+SB_SELF_URL="${SB_SELF_URL:-https://raw.githubusercontent.com/Nemo-010/sb/main/sb}"
+
+# ---------------------------------------------------------------------------
+# paths
+# ---------------------------------------------------------------------------
+SB_HOME="${SB_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/sb}"
+SB_ENGINES="$SB_HOME/engines"
+SB_STATE="$SB_HOME/state"
+SB_CACHE="$SB_HOME/cache"
+SB_BIN="$SB_HOME/bin"
+SB_TMP="$SB_HOME/tmp"
+
+SB_CORE="nokk obscura lightpanda curl-impersonate"
+SB_EXTRA="moli"
+SB_ALL="$SB_CORE $SB_EXTRA"
+
+# ---------------------------------------------------------------------------
+# what is pinned, and why
+#
+# One line per engine/platform. The sha256 is the upstream GitHub asset digest.
+# A pin is a promise: this exact byte-for-byte build was measured to work.
+# To move a pin, see `sb install <engine> --latest` - it prints a ready-made
+# manifest line so you never have to edit logic, only data.
+#
+#   engine|tag|version|os|arch|kind|asset-template|sha256
+#
+# @T@ in the asset template is replaced with the release tag, exactly as
+# upstream spells it ("v0.2.6" for one project, "1.0.3" for another).
+# ---------------------------------------------------------------------------
+SB_MANIFEST="
+nokk|v0.1.49-alpha|0.1.49-alpha|linux|x86_64|tar|nokk-render-@T@-linux-x86_64.tar.gz|eba71cea2a787f76a33279bce06c755598c99bfde92a8646b8a288aee3017be1
+nokk|v0.1.49-alpha|0.1.49-alpha|linux|arm64|tar|nokk-@T@-linux-aarch64.tar.gz|7625e344803fed93bd37260a4e9a1d4044d6daac6302df1850dd7263735998bc
+nokk|v0.1.49-alpha|0.1.49-alpha|macos|arm64|tar|nokk-@T@-macos-aarch64.tar.gz|a2bcc02fe2dfacb70fdd116437e576924c09cd47ac39d26107b881942c1e66d7
+obscura|v0.2.6|0.2.6|linux|x86_64|tar|obscura-x86_64-linux-stealth.tar.gz|ac8057374ec1b5cabb78ea2d08b2ed890d21d156a42b1ac23357fd049edc08c5
+obscura|v0.2.6|0.2.6|linux|arm64|tar|obscura-aarch64-linux-stealth.tar.gz|403b4c8e3bcf777748a870fbb32c9281e997a6c30c5f8377c17305287fc3811f
+obscura|v0.2.6|0.2.6|macos|x86_64|tar|obscura-x86_64-macos-stealth.tar.gz|23ececed3162e337f4cce97eb3c69611b253fc32f383753bee40f817a1220953
+obscura|v0.2.6|0.2.6|macos|arm64|tar|obscura-aarch64-macos-stealth.tar.gz|01a29bb9eb3a7eda89c036db187bbdd9a01b76d3d8e4860117c00fc881ac40bf
+lightpanda|1.0.3|1.0.3|linux|x86_64|file|lightpanda-x86_64-linux|53eb34da09159dcf8f04865dbfe3e63e9a652062684495aa7ced5ddd7c82e8b0
+lightpanda|1.0.3|1.0.3|linux|arm64|file|lightpanda-aarch64-linux|20a5348bf3b6f71e41088223b188552ab550c1b9c9a9cbd8f099e6f7f3d78549
+lightpanda|1.0.3|1.0.3|macos|x86_64|file|lightpanda-x86_64-macos|ec8155d37bc4a5dca770edacd17ceeda7a07a5ef8cf4bde22f0f8fa8b220f5fb
+lightpanda|1.0.3|1.0.3|macos|arm64|file|lightpanda-aarch64-macos|7afaf67e72aee0243e1aec56ceba5d2f200c7f018b065f72e84d44afd75af1d1
+moli|v1.1.22|1.1.22|linux|x86_64|tar|moli-x86_64-unknown-linux-gnu.tar.gz|7e10f9a5b62371da56203b21ac0172bbe3c3626de189fc3742b91b2e2b8cdd39
+moli|v1.1.22|1.1.22|linux|arm64|tar|moli-aarch64-unknown-linux-gnu.tar.gz|a199802d237fff981cb5a72ac075813af2510f5a4b51ce182d8fc18b5520210b
+moli|v1.1.22|1.1.22|macos|x86_64|tar|moli-x86_64-apple-darwin.tar.gz|f46620237211dde3b075f4f6260bac7b33671062186429dc1ef8f69244a03b65
+moli|v1.1.22|1.1.22|macos|arm64|tar|moli-aarch64-apple-darwin.tar.gz|1498d3add44b888051fc29c2cb52dd4a5188128f17ec2c9060b2b42436e76dfd
+curl-impersonate|v2.3.2|2.3.2|linux|x86_64|tar|curl-impersonate-@T@.x86_64-linux-gnu.tar.gz|bc9bd2522fe1850dd54c0fff189c8dd606df3f222ab2a905f2dd255123c3f495
+curl-impersonate|v2.3.2|2.3.2|linux|arm64|tar|curl-impersonate-@T@.aarch64-linux-gnu.tar.gz|35a351db883f5ce82945bd8280c727b08e27aa48594d4eb9e091d8c80e936d52
+curl-impersonate|v2.3.2|2.3.2|macos|x86_64|tar|curl-impersonate-@T@.x86_64-macos.tar.gz|4e9fe855a34d011de88bf216c196f6957624526678b99b4f2135acc9ffa8c156
+curl-impersonate|v2.3.2|2.3.2|macos|arm64|tar|curl-impersonate-@T@.arm64-macos.tar.gz|638ed43cc93cb5da91f794ff23fce1735fec3dc5c09ee87cc499d802c25d2d35
+"
+
+# engine|owner/repo|binary-name|what it is for
+SB_META="
+nokk|koloss777/nokk|nokk|clears JS-gated walls (ships a Cloudflare solver), JSON verdicts, no pixels
+obscura|h4ckf0r0day/obscura|obscura|the full engine: render, screenshot, CDP, MCP, stealth TLS
+lightpanda|lightpanda-io/browser|lightpanda|smallest RSS, fastest bulk text, honest UA (no stealth)
+moli|lexmount/moli|moli|best one-shot form automation, consistent UA, layout is opt-in
+curl-impersonate|lexiforest/curl-impersonate|curl-impersonate|no JS; a real Chrome ClientHello, 12 MiB, 0.6 s
+"
+
+# engine|js|render|screenshot|pdf|eval|solve|markdown|cdp
+SB_CAPS="
+nokk|yes|no|no|no|yes|yes|no|yes
+obscura|yes|yes|yes|no|yes|no|yes|yes
+lightpanda|yes|stub|stub|stub|no|no|yes|yes
+moli|yes|yes|yes|yes|yes|no|yes|yes
+curl-impersonate|no|no|no|no|no|no|no|no
+"
+
+# wall markers, adopted from the s-browse corpus classifier. Tuned to
+# under-report a wall rather than over-report one.
+SB_WALL_RE='just a moment|checking your browser|enable javascript and cookies|cf-mitigated|challenge-platform|verify you are (a )?human|are you a robot|unusual traffic|access denied|attention required|incapsula|pardon our interruption|ddos protection|press (&|and) hold|please complete the security check|验证码|人机验证|安全验证|滑动验证|拒绝访问|访问受限|异常访问|请完成验证'
+
+# ---------------------------------------------------------------------------
+# tiny utilities
+# ---------------------------------------------------------------------------
+_ec=0
+say()  { printf '%s\n' "$*" >&2; }
+warn() { printf 'sb: %s\n' "$*" >&2; }
+die()  { _rc=${2:-1}; printf 'sb: %s\n' "$1" >&2; exit "$_rc"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+cleanup() {
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			[ -n "${SB_RUNDIR:-}" ] && [ -d "${SB_RUNDIR:-}" ] && rm -rf "$SB_RUNDIR"
+	)
+}
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+sb_os() {
+	case "$(uname -s)" in
+		Linux) echo linux ;;
+		Darwin) echo macos ;;
+		*) echo unknown ;;
+	esac
+}
+
+sb_arch() {
+	case "$(uname -m)" in
+		x86_64|amd64) echo x86_64 ;;
+		aarch64|arm64) echo arm64 ;;
+		*) echo unknown ;;
+	esac
+}
+
+sha256_of() {
+	if have sha256sum; then sha256sum "$1" | cut -d' ' -f1
+	elif have shasum; then shasum -a 256 "$1" | cut -d' ' -f1
+	elif have openssl; then openssl dgst -sha256 "$1" | sed 's/.*= *//'
+	elif have busybox; then busybox sha256sum "$1" | cut -d' ' -f1
+	else die "no sha256 tool (need sha256sum, shasum or openssl)" 3
+	fi
+}
+
+# escape stdin for use inside a JSON string
+json_escape() {
+	tr -d '\000-\010\013\014\016-\037' |
+		sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' -e 's/\r//g' |
+		awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}'
+}
+
+# whole file -> single JSON string literal (with quotes)
+json_file() { printf '"'; json_escape < "$1"; printf '"'; }
+
+bytes_of() {
+	if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi
+}
+
+# Run "$@" with a wall-clock cap. Uses coreutils timeout when present and
+# falls back to a portable supervisor so this works on stock macOS too.
+run_timeout() {
+	_rt_sec=$1
+	shift
+	if have timeout; then
+		timeout "$_rt_sec" "$@"
+		return $?
+	fi
+	"$@" &
+	_rt_pid=$!
+	(
+		sleep "$_rt_sec"
+		kill -TERM "$_rt_pid" 2>/dev/null || exit 0
+		sleep 2
+		kill -KILL "$_rt_pid" 2>/dev/null
+	) >/dev/null 2>&1 &
+	_rt_wd=$!
+	wait "$_rt_pid"
+	_rt_rc=$?
+	kill "$_rt_wd" 2>/dev/null
+	wait "$_rt_wd" 2>/dev/null
+	return "$_rt_rc"
+}
+
+# ---------------------------------------------------------------------------
+# manifest access
+# ---------------------------------------------------------------------------
+mf_get() { # engine os arch -> tag|version|kind|template|sha256
+	printf '%s\n' "$SB_MANIFEST" | while IFS='|' read -r e g v o a k t s; do
+		[ -z "$e" ] && continue
+		if [ "$e" = "$1" ] && [ "$o" = "$2" ] && [ "$a" = "$3" ]; then
+			printf '%s|%s|%s|%s|%s\n' "$g" "$v" "$k" "$t" "$s"
+			return 0
+		fi
+	done
+}
+
+mf_meta() { # engine -> repo bin desc
+	printf '%s\n' "$SB_META" | while IFS='|' read -r e r b d; do
+		[ -z "$e" ] && continue
+		if [ "$e" = "$1" ]; then printf '%s|%s|%s\n' "$r" "$b" "$d"; return 0; fi
+	done
+}
+
+mf_caps() { # engine -> js|render|screenshot|pdf|eval|solve|markdown|cdp
+	printf '%s\n' "$SB_CAPS" | while IFS='|' read -r e a b c d f g h i; do
+		[ -z "$e" ] && continue
+		if [ "$e" = "$1" ]; then printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+			"$a" "$b" "$c" "$d" "$f" "$g" "$h" "$i"; return 0; fi
+	done
+}
+
+cap() { # engine field -> value
+	_c=$(mf_caps "$1")
+	case "$2" in
+		js) printf '%s' "$_c" | cut -d'|' -f1 ;;
+		render) printf '%s' "$_c" | cut -d'|' -f2 ;;
+		screenshot) printf '%s' "$_c" | cut -d'|' -f3 ;;
+		pdf) printf '%s' "$_c" | cut -d'|' -f4 ;;
+		eval) printf '%s' "$_c" | cut -d'|' -f5 ;;
+		solve) printf '%s' "$_c" | cut -d'|' -f6 ;;
+		markdown) printf '%s' "$_c" | cut -d'|' -f7 ;;
+		cdp) printf '%s' "$_c" | cut -d'|' -f8 ;;
+	esac
+}
+
+engine_repo() { mf_meta "$1" | cut -d'|' -f1; }
+engine_binname() { mf_meta "$1" | cut -d'|' -f2; }
+engine_desc() { mf_meta "$1" | cut -d'|' -f3; }
+engine_pins() { # every pinned version for an engine
+	printf '%s\n' "$SB_MANIFEST" | awk -F'|' -v e="$1" '$1==e {print $3}' | sort -u
+}
+engine_pinned_version() { engine_pins "$1" | head -n 1; }
+
+# ---------------------------------------------------------------------------
+# installed state
+# ---------------------------------------------------------------------------
+installed_version() { # engine -> version or empty
+	[ -L "$SB_ENGINES/$1/current" ] || return 0
+	readlink "$SB_ENGINES/$1/current" 2>/dev/null | sed 's|.*/||'
+}
+
+engine_root() { # engine -> dir of the active install
+	printf '%s\n' "$SB_ENGINES/$1/current"
+}
+
+engine_bin() { # engine -> absolute path to the binary, or empty
+	_er="$SB_ENGINES/$1/current"
+	[ -d "$_er" ] || return 0
+	_b=""
+	[ -f "$_er/.sb-install" ] && _b=$(sed -n 's/^BIN=//p' "$_er/.sb-install")
+	if [ -n "$_b" ] && [ -x "$_er/$_b" ]; then
+		printf '%s\n' "$_er/$_b"
+		return 0
+	fi
+	_bn=$(engine_binname "$1")
+	[ -z "$_bn" ] && return 0
+	_f=$(find "$_er" -maxdepth 3 -type f -name "$_bn" 2>/dev/null | head -n 1)
+	[ -n "$_f" ] && printf '%s\n' "$_f"
+}
+
+ensure_dirs() {
+	mkdir -p "$SB_ENGINES" "$SB_STATE" "$SB_CACHE" "$SB_BIN" "$SB_TMP" || die "cannot create $SB_HOME" 3
+	SB_RUNDIR=$(mktemp -d "$SB_TMP/run.XXXXXX") || die "cannot create a run directory under $SB_TMP" 3
+}
+
+# Every engine runs with HOME and the XDG dirs pointed inside $SB_HOME, so it
+# cannot write to the real $HOME (nokk, for one, writes ~/.cache/nokk).
+# engine_exec ENGINE TIMEOUT_SECONDS CMD [ARGS...]   (timeout 0 = none)
+engine_exec() { # engine seconds cmd...
+	_e_eng=$1
+	_e_sec=$2
+	shift 2
+	for _d in home cache config data tmp; do
+		mkdir -p "$SB_STATE/$_e_eng/$_d" 2>/dev/null
+	done
+	(
+		HOME="$SB_STATE/$_e_eng/home"
+		XDG_CACHE_HOME="$SB_STATE/$_e_eng/cache"
+		XDG_CONFIG_HOME="$SB_STATE/$_e_eng/config"
+		XDG_DATA_HOME="$SB_STATE/$_e_eng/data"
+		TMPDIR="$SB_STATE/$_e_eng/tmp"
+		NO_COLOR=1
+		RUST_LOG=error
+		export HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME TMPDIR NO_COLOR RUST_LOG
+		# stdin is /dev/null on purpose: when sb is piped into sh, the script
+		# itself is on fd 0, and an engine that reads stdin would eat it.
+		case "$_e_sec" in
+			''|0|-) "$@" </dev/null ;;
+			*) run_timeout "$_e_sec" "$@" </dev/null ;;
+		esac
+	)
+}
+
+# ---------------------------------------------------------------------------
+# download + install
+# ---------------------------------------------------------------------------
+dl() { # url dest
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			_dl_url=$1
+			_dl_dest=$2
+			case "${SB_MIRROR:-}" in
+				'') ;;
+				*) _dl_url=$(printf '%s' "$_dl_url" | sed "s|^https://github.com/|${SB_MIRROR%/}/|") ;;
+			esac
+			mkdir -p "$SB_CACHE/dl" || die "cannot create $SB_CACHE/dl" 3
+			_dl_tmp="$_dl_dest.part.$$"
+			if have curl; then
+				curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$_dl_tmp" "$_dl_url" || {
+					rm -f "$_dl_tmp"
+					die "download failed: $_dl_url" 4
+				}
+			elif have wget; then
+				wget -q -O "$_dl_tmp" "$_dl_url" || {
+					rm -f "$_dl_tmp"
+					die "download failed: $_dl_url" 4
+				}
+			else
+				die "need curl or wget to download" 3
+			fi
+			mv -f "$_dl_tmp" "$_dl_dest" || die "cannot write $_dl_dest" 3
+	)
+}
+
+latest_tag() { # engine -> newest upstream tag, or empty
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			_repo=$(engine_repo "$1")
+			[ -z "$_repo" ] && return 0
+			# releases/latest redirects to .../releases/tag/<tag>; read the final URL
+			_u=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+				"https://github.com/$_repo/releases/latest" 2>/dev/null) || return 0
+			printf '%s\n' "$_u" | sed -n 's|.*/releases/tag/||p'
+	)
+}
+
+install_engine() { # engine [--latest] [--no-verify]
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			_eng=$1
+			shift
+			_latest=0
+			_verify=1
+			for _a in "$@"; do
+				case "$_a" in
+					--latest) _latest=1 ;;
+					--no-verify) _verify=0 ;;
+				esac
+			done
+
+			_os=$(sb_os)
+			_arch=$(sb_arch)
+			_line=$(mf_get "$_eng" "$_os" "$_arch")
+			[ -z "$_line" ] && die "$_eng: no build pinned for $_os/$_arch (see sb engines)" 3
+			_tag=$(printf '%s' "$_line" | cut -d'|' -f1)
+			_ver=$(printf '%s' "$_line" | cut -d'|' -f2)
+			_kind=$(printf '%s' "$_line" | cut -d'|' -f3)
+			_tmpl=$(printf '%s' "$_line" | cut -d'|' -f4)
+			_sha=$(printf '%s' "$_line" | cut -d'|' -f5)
+			_repo=$(engine_repo "$_eng")
+			_binname=$(engine_binname "$_eng")
+
+			if [ "$_latest" = 1 ]; then
+				_tag=$(latest_tag "$_eng")
+				[ -n "$_tag" ] || die "$_eng: cannot resolve the latest release tag (network or rate limit)" 4
+				_ver=$(printf '%s' "$_tag" | sed 's/^v//')
+				_sha=""
+				warn "$_eng: --latest is unpinned; integrity cannot be checked"
+			fi
+			_asset=$(printf '%s' "$_tmpl" | sed "s|@T@|$_tag|g")
+
+			_cur=$(installed_version "$_eng")
+			if [ -n "$_cur" ] && [ "$_cur" = "$_ver" ] && [ -x "$(engine_bin "$_eng")" ]; then
+				say "$_eng: $_ver already installed ($(engine_bin "$_eng"))"
+				return 0
+			fi
+
+			_url="https://github.com/$_repo/releases/download/$_tag/$_asset"
+			_dest="$SB_CACHE/dl/$_asset"
+			say "$_eng: downloading $_ver ($_asset)"
+			[ -f "$_dest" ] || dl "$_url" "$_dest"
+			_got=$(sha256_of "$_dest")
+			if [ -n "$_sha" ] && [ "$_verify" = 1 ] && [ "$_got" != "$_sha" ]; then
+				rm -f "$_dest"
+				die "checksum mismatch for $_asset
+		  expected $_sha
+		  got      $_got
+		Refusing to install. Re-run with --no-verify only if you trust this download." 5
+			fi
+			if [ -z "$_sha" ]; then
+				say "sb: computed sha256 $_got"
+				say "sb: pin it by adding this line to SB_MANIFEST:"
+				say "  $_eng|$_tag|$_ver|$_os|$_arch|$_kind|$(printf '%s' "$_asset" | sed "s|$_tag|@T@|")|$_got"
+			fi
+
+			_vdir="$SB_ENGINES/$_eng/$_ver"
+			_stage="$SB_ENGINES/$_eng/.stage.$$"
+			rm -rf "$_stage"
+			mkdir -p "$_stage"
+			case "$_kind" in
+				tar)
+					tar -xzf "$_dest" -C "$_stage" 2>/dev/null || {
+						rm -rf "$_stage"
+						die "$_eng: cannot extract $_asset" 5
+					}
+					;;
+				file)
+					mkdir -p "$_stage/bin"
+					cp "$_dest" "$_stage/bin/$_binname" || die "$_eng: cannot copy binary" 3
+					chmod 755 "$_stage/bin/$_binname"
+					;;
+				*)
+					rm -rf "$_stage"
+					die "$_eng: unknown asset kind $_kind" 3
+					;;
+			esac
+
+			_rel=$(find "$_stage" -maxdepth 3 -type f -name "$_binname" 2>/dev/null | head -n 1)
+			if [ -z "$_rel" ]; then
+				rm -rf "$_stage"
+				die "$_eng: $_asset does not contain $_binname" 5
+			fi
+			case "$_rel" in
+				/*) _rel=$(printf '%s' "$_rel" | sed "s|^$_stage/||") ;;
+				*) _rel=$(printf '%s' "$_rel" | sed "s|^\./||") ;;
+			esac
+			chmod 755 "$_stage/$_rel" 2>/dev/null
+
+			rm -rf "$_vdir"
+			mkdir -p "$(dirname "$_vdir")"
+			mv "$_stage" "$_vdir" || die "$_eng: cannot move staging dir into place" 3
+			_binsha=$(sha256_of "$_vdir/$_rel")
+			{
+				echo "ENGINE=$_eng"
+				echo "VERSION=$_ver"
+				echo "OS=$_os"
+				echo "ARCH=$_arch"
+				echo "BIN=$_rel"
+				echo "ASSET=$_asset"
+				echo "URL=$_url"
+				echo "ASSET_SHA256=$_sha"
+				echo "DOWNLOADSHA=$_got"
+				echo "BIN_SHA256=$_binsha"
+				echo "INSTALLED=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+			} > "$_vdir/.sb-install"
+			ln -sfn "$_ver" "$SB_ENGINES/$_eng/current.new"
+			mv -f "$SB_ENGINES/$_eng/current.new" "$SB_ENGINES/$_eng/current"
+
+			write_wrappers "$_eng"
+			say "$_eng: $_ver installed -> $(engine_bin "$_eng")"
+	)
+}
+
+# Thin wrappers on $SB_HOME/bin so the raw upstream binaries are usable as
+# themselves, with the hermetic environment already applied.
+write_wrappers() {
+	# subshell: keeps this function's scratch variables out of the caller
+	(
+			_eng=$1
+			_vdir="$SB_ENGINES/$_eng/$(installed_version "$_eng")"
+			_bin=$(engine_bin "$_eng")
+			[ -n "$_bin" ] || return 0
+			for _d in home cache config data tmp; do mkdir -p "$SB_STATE/$_eng/$_d"; done
+			_envs="HOME='$SB_STATE/$_eng/home' XDG_CACHE_HOME='$SB_STATE/$_eng/cache' XDG_CONFIG_HOME='$SB_STATE/$_eng/config' XDG_DATA_HOME='$SB_STATE/$_eng/data' TMPDIR='$SB_STATE/$_eng/tmp' NO_COLOR=1 RUST_LOG=error"
+
+			_w="$SB_BIN/$_eng"
+			{
+				echo '#!/bin/sh'
+				echo "# generated by sb $SB_VERSION for $(_eng=$_eng; installed_version "$_eng") - do not edit"
+				echo "exec env $_envs '$_bin' \"\$@\""
+			} > "$_w.tmp.$$" && chmod 755 "$_w.tmp.$$" && mv -f "$_w.tmp.$$" "$_w"
+
+			# curl-impersonate ships a wrapper per browser profile; expose all of them
+			if [ "$_eng" = "curl-impersonate" ]; then
+				for _f in "$(dirname "$_bin")"/curl_*; do
+					[ -f "$_f" ] || continue
+					[ -x "$_f" ] || continue
+					_n=$(basename "$_f")
+					{
+						echo '#!/bin/sh'
+						echo "# generated by sb $SB_VERSION - do not edit"
+						echo "exec env $_envs '$_f' \"\$@\""
+					} > "$SB_BIN/$_n.tmp.$$" && chmod 755 "$SB_BIN/$_n.tmp.$$" && mv -f "$SB_BIN/$_n.tmp.$$" "$SB_BIN/$_n"
+				done
+			fi
+	)
+}
+
+# Auto-install. A machine with nothing installed gets the core set on first
+# use, which is what makes `sb get URL` a genuine one-command start. Once
+# anything is installed, a missing optional engine is skipped with a note
+# instead of pulling 45 MB mid-request - `sb install <engine>` is explicit.
+anything_installed() {
+	for _e in $SB_ALL; do
+		[ -n "$(installed_version "$_e")" ] && return 0
+	done
+	return 1
+}
+
+ensure_engine() { # engine
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			_b=$(engine_bin "$1")
+			if [ -n "$_b" ] && [ -x "$_b" ]; then return 0; fi
+			case "${SB_AUTO_INSTALL:-1}" in
+				0) return 1 ;;
+			esac
+			anything_installed || return 1
+			say "$1: not installed (sb install $1) - skipping"
+			return 1
+	)
+}
+
+# Only the bootstrap path installs; call it once per process at most.
+bootstrap() {
+	# subshell: POSIX sh has no locals, so a callee would otherwise
+	# overwrite the caller's scratch variables (this bit `sb get` once).
+	(
+			anything_installed && return 0
+			case "${SB_AUTO_INSTALL:-1}" in 0) return 0 ;; esac
+			say "sb: nothing installed yet, installing the core set once"
+			ensure_dirs
+			for _e in $SB_CORE; do
+				install_engine "$_e" || return 1
+			done
+			return 0
+	)
+}
+
+# ---------------------------------------------------------------------------
+# adapters
+#
+# These are the only places that know an engine's flags. They were verified
+# against the pinned versions in the s-browse corpus and re-verified live.
+# If an upstream release renames a flag, the fix is one line here - and until
+# then `sb run <engine> -- <any flags>` still works unchanged.
+#
+# Textual adapters write to stdout. Binary adapters ($3 = outfile) write a file.
+# ---------------------------------------------------------------------------
+ad_fetch() { # engine format url outfile timeout
+	# subshell: keeps this function's scratch variables out of the caller
+	(
+			_e=$1; _f=$2; _u=$3; _o=$4; _t=$5
+			_b=$(engine_bin "$_e") || return 1
+			[ -n "$_b" ] || return 1
+			_px=${SB_PROXY_OPT:-}
+
+			case "$_e:$_f" in
+				obscura:text)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth --dump text -q ${_px:+--proxy "$_px"} ;;
+				obscura:markdown)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth --dump markdown -q ${_px:+--proxy "$_px"} ;;
+				obscura:html)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth --dump html -q ${_px:+--proxy "$_px"} ;;
+				obscura:links)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth --dump links -q ${_px:+--proxy "$_px"} ;;
+				obscura:png)
+					rm -f "$_o"
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth -q --screenshot "$_o" ${_px:+--proxy "$_px"}
+					[ -s "$_o" ] ;;
+
+				nokk:text)
+					engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" \
+						--eval "$SB_JS_TEXT" ;;
+				nokk:html)
+					engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" \
+						--eval 'document.documentElement?document.documentElement.outerHTML:""' ;;
+				nokk:markdown)
+					# nokk has no markdown dumper; text is the honest substitute
+					engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" \
+						--eval "$SB_JS_TEXT" ;;
+				nokk:links)
+					engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" \
+						--eval 'JSON.stringify(Array.prototype.map.call(document.links,function(a){return a.href}),null,1)' ;;
+
+				lightpanda:text|lightpanda:markdown)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --dump markdown --dump-max-bytes 4000000 ${_px:+--http-proxy "$_px"} ;;
+				lightpanda:html)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --dump html ${_px:+--http-proxy "$_px"} ;;
+				lightpanda:png)
+					rm -f "$_o"
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --dump png ${_px:+--http-proxy "$_px"} > "$_o" 2>/dev/null
+					[ -s "$_o" ] ;;
+				lightpanda:pdf)
+					rm -f "$_o"
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --dump pdf ${_px:+--http-proxy "$_px"} > "$_o" 2>/dev/null
+					[ -s "$_o" ] ;;
+
+				moli:text|moli:markdown)
+					engine_exec "$_e" "$_t" "$_b" fetch --dump markdown "$_u" ${_px:+--http-proxy "$_px"} 2>/dev/null ;;
+				moli:html)
+					engine_exec "$_e" "$_t" "$_b" fetch --dump html "$_u" ${_px:+--http-proxy "$_px"} 2>/dev/null ;;
+				moli:png)
+					rm -f "$_o"
+					engine_exec "$_e" "$_t" "$_b" fetch --layout --dump screenshot "$_u" ${_px:+--http-proxy "$_px"} > "$_o" 2>/dev/null
+					[ -s "$_o" ] ;;
+				moli:pdf)
+					rm -f "$_o"
+					engine_exec "$_e" "$_t" "$_b" fetch --layout --dump pdf "$_u" ${_px:+--http-proxy "$_px"} > "$_o" 2>/dev/null
+					[ -s "$_o" ] ;;
+
+				curl-impersonate:text)
+					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
+						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null | strip_html ;;
+				curl-impersonate:html)
+					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
+						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null ;;
+				curl-impersonate:links)
+					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
+						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null |
+						sed -n 's/.*href="\([^"]*\)".*/\1/p' | sort -u ;;
+				curl-impersonate:markdown|curl-impersonate:png|curl-impersonate:pdf)
+					return 1 ;;
+
+				*)
+					return 1 ;;
+			esac
+	)
+}
+
+# Plain-text extraction for engines with no text mode. Not a renderer: it
+# drops script/style content, turns block-level tags into line breaks, and
+# unescapes the common entities. A single left-to-right scan over the whole
+# document, because sed's greedy matching deletes the body between the first
+# <style> and the last </style> on a one-line HTML document.
+strip_html() {
+	awk '
+	{ buf = buf $0 "\n" }
+	END {
+		n = length(buf)
+		low = tolower(buf)
+		out = ""
+		i = 1
+		while (i <= n) {
+			p = index(substr(low, i), "<")
+			if (p == 0) { out = out substr(buf, i); break }
+			if (p > 1) out = out substr(buf, i, p - 1)
+			i = i + p - 1
+			# end of the tag
+			q = index(substr(low, i), ">")
+			if (q == 0) break
+			raw = substr(buf, i + 1, q - 2)
+			tag = tolower(raw)
+			sub(/^[ \t\n\r\/]+/, "", tag)
+			sub(/[ \t\n\r\/]+$/, "", tag)
+			sub(/[ \t\n\r].*$/, "", tag)
+			i = i + q
+			if (tag == "script" || tag == "style" || tag == "noscript" || tag == "template") {
+				cl = "</" tag
+				e = index(substr(low, i), cl)
+				if (e == 0) { i = n + 1; break }
+				i = i + e - 1
+				e2 = index(substr(low, i), ">")
+				if (e2 == 0) { i = n + 1; break }
+				i = i + e2
+				continue
+			}
+			if (tag ~ /^(br|hr|p|div|li|tr|h[1-6]|section|article|header|footer|nav|main|blockquote|pre|table|thead|tbody|ul|ol|dl|dt|dd|figure|figcaption|form|fieldset|address|aside|details|summary|title)$/) {
+				out = out "\n"
+			}
+		}
+		gsub(/&nbsp;/,   " ",  out)
+		gsub(/&lt;/,     "<",  out)
+		gsub(/&gt;/,     ">",  out)
+		gsub(/&quot;/,   "\"", out)
+		gsub(/&#39;/,    "\047", out)
+		gsub(/&apos;/,   "\047", out)
+		gsub(/&mdash;/,  "-",  out)
+		gsub(/&ndash;/,  "-",  out)
+		gsub(/&hellip;/, "...", out)
+		gsub(/&amp;/,    "\\&", out)
+		m = split(out, parts, "\n")
+		for (k = 1; k <= m; k++) {
+			l = parts[k]
+			gsub(/[ \t\r]+/, " ", l)
+			sub(/^ /, "", l)
+			sub(/ $/, "", l)
+			if (length(l) > 0) print l
+		}
+	}
+	'
+}
+
+ad_eval() { # engine url js timeout
+	# subshell: keeps this function's scratch variables out of the caller
+	(
+			_e=$1; _u=$2; _js=$3; _t=$4
+			_b=$(engine_bin "$_e")
+			[ -n "$_b" ] || return 1
+			case "$_e" in
+				obscura)
+					engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth -q -e "$_js" ;;
+				nokk)
+					engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" --eval "$_js" ;;
+				moli)
+					engine_exec "$_e" "$_t" "$_b" fetch --eval "$_js" "$_u" 2>/dev/null ;;
+				*)
+					return 8 ;;
+			esac
+	)
+}
+
+ad_solve() { # url wait session
+	# subshell: keeps this function's scratch variables out of the caller
+	(
+			_u=$1; _w=$2; _s=$3
+			_b=$(engine_bin nokk) || return 1
+			[ -n "$_b" ] || return 1
+			_extra=""
+			[ -n "$_s" ] && _extra="--session $_s --session-store $SB_STATE/nokk/sessions"
+			[ -n "${SB_PROXY_OPT:-}" ] && _extra="$_extra --proxy $SB_PROXY_OPT"
+			# shellcheck disable=SC2086
+			engine_exec nokk "$((_w + 30))" "$_b" --log error --load "$_u" \
+				--solve-challenge "$_w" --json $_extra
+	)
+}
+
+# ---------------------------------------------------------------------------
+# result classification
+# ---------------------------------------------------------------------------
+is_wall() { # file
+	[ -f "$1" ] || return 1
+	if grep -qiE "$SB_WALL_RE" "$1" 2>/dev/null; then return 0; fi
+	return 1
+}
+
+# Several engines exit 0 even when navigation failed (moli, lightpanda, nokk
+# and obscura all print their error and return success). Trusting $? alone
+# would hand an agent an error page as if it were content, so failure is
+# detected from the engines' own messages.
+failed_out() { # engine stdout-file stderr-file
+	[ -f "$2" ] || return 1
+	cat "$2" "$3" 2>/dev/null | grep -qiE \
+		'"ok"[[:space:]]*:[[:space:]]*false|[{,]"?error"?[[:space:]]*:|failed to navigate|navigation failed|failed to fetch|page failed|couldntconnect|could not resolve|no such host|connection refused|dns error|tls error|proxyconnect|unknown impersonation|blocked bad port'
+}
+
+# the verdict for one attempt: ok | wall | thin | error
+verdict() { # engine outfile errfile min_chars
+	if failed_out "$1" "$2" "$3"; then echo error; return; fi
+	if is_wall "$2"; then echo wall; return; fi
+	if [ "$(bytes_of "$2")" -lt "${4:-0}" ]; then echo thin; return; fi
+	echo ok
+}
+
+# ---------------------------------------------------------------------------
+# chains
+# ---------------------------------------------------------------------------
+# The default escalation order per format. Each entry is {"engine":"mode"}:
+# plain mode is the engine's own dumper, +ci means "run it through
+# curl-impersonate and strip the HTML", which is the cheapest attempt and only
+# a fallback for formats no installed engine dumps natively.
+chain_for() { # format explicit-engine
+	_f=$1
+	_e=$2
+	if [ -n "$_e" ] && [ "$_e" != auto ]; then printf '%s\n' "$_e"; return; fi
+	case "${SB_CHAIN:-}" in
+		'') ;;
+		*) printf '%s' "$SB_CHAIN"; return ;;
+	esac
+	case "$_f" in
+		text)
+			printf '%s\n' "curl-impersonate nokk obscura lightpanda moli" ;;
+		markdown)
+			# only obscura, lightpanda and moli emit real markdown; nokk has
+			# no markdown dumper, so it is not offered for this format
+			printf '%s\n' "obscura lightpanda moli" ;;
+		html)
+			# the raw-HTTP engine first: it is 100x cheaper and returns the
+			# document the server sent, which is what --as html should mean
+			printf '%s\n' "curl-impersonate obscura lightpanda moli" ;;
+		links)
+			printf '%s\n' "obscura curl-impersonate nokk" ;;
+		png)
+			printf '%s\n' "obscura moli lightpanda" ;;
+		pdf)
+			printf '%s\n' "moli lightpanda" ;;
+		*)
+			printf '%s\n' "$SB_CORE" ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+cmd_install() {
+	_want=""
+	_opts=""
+	for _a in "$@"; do
+		case "$_a" in
+			--latest|--no-verify|--force) _opts="$_opts $_a" ;;
+			all) _want="$_want $SB_ALL" ;;
+			*)
+				case " $SB_ALL " in
+					*" $_a "*) _want="$_want $_a" ;;
+					*) die "sb install: unknown engine '$_a' (known: $SB_ALL)" 2 ;;
+				esac ;;
+		esac
+	done
+	[ -z "$_want" ] && _want="$SB_CORE"
+	ensure_dirs
+	_fail=0
+	for _e in $_want; do
+		# shellcheck disable=SC2086
+		install_engine "$_e" $_opts || _fail=1
+	done
+	_reg="$SB_BIN/sb"
+	if [ ! -x "$_reg" ] || [ "$(cat "$_reg" 2>/dev/null | head -n 2 | tail -n 1)" != "# sb $SB_VERSION" ]; then
+		_self=$(self_source)
+		if [ -n "$_self" ] && [ -f "$_self" ]; then
+			cp "$_self" "$_reg.tmp.$$" && chmod 755 "$_reg.tmp.$$" && mv -f "$_reg.tmp.$$" "$_reg"
+			say "sb $SB_VERSION: installed -> $_reg"
+		fi
+	fi
+	cat >&2 <<EOF
+
+Installed. Add sb to PATH:
+
+  export PATH="$SB_BIN:\$PATH"
+
+Then:
+
+  sb get https://example.com                 # text, escalating past bot walls
+  sb solve https://www.scrapingcourse.com/cloudflare-challenge
+  sb shot https://example.com --out page.png
+  sb help                                    # one screen
+EOF
+	[ "$_fail" = 0 ] || exit 3
+}
+
+self_source() {
+	# when run as a file, that file is the source of truth
+	case "${0:-}" in
+		''|-sh|sh) return 0 ;;
+	esac
+	[ -f "$0" ] && printf '%s\n' "$0"
+}
+
+cmd_uninstall() {
+	_all=0
+	_want=""
+	for _a in "$@"; do
+		case "$_a" in
+			--all) _all=1 ;;
+			*) _want="$_want $_a" ;;
+		esac
+	done
+	if [ "$_all" = 1 ]; then _want="$SB_ALL"; fi
+	[ -z "$_want" ] && die "sb uninstall: name an engine or --all" 2
+	for _e in $_want; do
+		case " $SB_ALL " in
+			*" $_e "*) ;;
+			*) die "sb uninstall: unknown engine '$_e'" 2 ;;
+		esac
+		if [ -d "$SB_ENGINES/$_e" ]; then
+			rm -rf "$SB_ENGINES/$_e" "$SB_STATE/$_e"
+			rm -f "$SB_BIN/$_e"
+			[ "$_e" = curl-impersonate ] && rm -f "$SB_BIN"/curl_chrome* "$SB_BIN"/curl_firefox* "$SB_BIN"/curl_safari* "$SB_BIN"/curl_edge* "$SB_BIN"/curl_tor*
+			say "$_e: removed"
+		else
+			say "$_e: not installed"
+		fi
+	done
+}
+
+cmd_list() {
+	_os=$(sb_os); _arch=$(sb_arch)
+	for _e in $SB_ALL; do
+		_v=$(installed_version "$_e")
+		_p=$(engine_pinned_version "$_e")
+		_b=$(engine_bin "$_e")
+		if [ -n "$_v" ] && [ -n "$_b" ]; then
+			printf '%-18s installed %-12s %s\n' "$_e" "$_v" "$_b"
+		else
+			printf '%-18s -         pinned %s (%s/%s)\n' "$_e" "${_p:--}" "$_os" "$_arch"
+		fi
+	done
+}
+
+cmd_engines() {
+	printf '%-18s %-12s %-4s %-6s %-4s %-4s %-4s %-5s %-8s %s\n' \
+		engine pinned js render shot pdf eval solve markdown cdp
+	for _e in $SB_ALL; do
+		_c=$(mf_caps "$_e")
+		printf '%-18s %-12s %-4s %-6s %-4s %-4s %-4s %-5s %-8s %s\n' \
+			"$_e" "$(engine_pinned_version "$_e")" \
+			"$(printf '%s' "$_c" | cut -d'|' -f1)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f2)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f3)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f4)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f5)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f6)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f7)" \
+			"$(printf '%s' "$_c" | cut -d'|' -f8)"
+	done
+	printf '\n%-18s %s\n' "" "what each one is for:"
+	for _e in $SB_ALL; do
+		printf '  %-18s %s\n' "$_e" "$(engine_desc "$_e")"
+	done
+	printf '\nlightpanda "stub" = it emits a file but paints no CSS (canvas hash 0).\n'
+	printf 'solve           = ships a Cloudflare/challenge solver; only nokk.\n'
+	printf 'cdp             = can serve CDP (needs bind(2), denied in some cages;\n'
+	printf '                  lightpanda can serve over a unix socket instead).\n'
+}
+
+cmd_get() {
+	_fmt=text
+	_engine=auto
+	_out=""
+	_json=0
+	_t=60
+	_min=40
+	_max=200000
+	_fallback=1
+	_url=""
+	_solve=1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--as) _fmt=${2:-}; shift 2 ;;
+			--engine|-e) _engine=${2:-}; shift 2 ;;
+			--out|-o) _out=${2:-}; shift 2 ;;
+			--json) _json=1; shift ;;
+			--timeout) _t=${2:-60}; shift 2 ;;
+			--min-chars) _min=${2:-40}; shift 2 ;;
+			--max-bytes) _max=${2:-200000}; shift 2 ;;
+			--no-fallback) _fallback=0; shift ;;
+			--no-solve) _solve=0; shift ;;
+			--proxy) SB_PROXY_OPT=${2:-}; shift 2 ;;
+			-*) die "sb get: unknown option $1" 2 ;;
+			*) [ -z "$_url" ] && _url=$1; shift ;;
+		esac
+	done
+	[ -n "$_url" ] || die "usage: sb get URL [--as text|markdown|html|links|png|pdf] [--out FILE] [--json]" 2
+	case "$_fmt" in
+		text|markdown|html|links|png|pdf) ;;
+		*) die "sb get: unknown --as '$_fmt' (text, markdown, html, links, png, pdf)" 2 ;;
+	esac
+	if [ -n "$_engine" ] && [ "$_engine" != auto ]; then
+		case " $SB_ALL " in
+			*" $_engine "*) ;;
+			*) die "sb get: unknown engine '$_engine' (known: $SB_ALL)" 2 ;;
+		esac
+	fi
+	ensure_dirs
+	bootstrap || true
+
+	_chain=$(chain_for "$_fmt" "$_engine")
+	_attempts=""
+	_best=""          # the chosen output file
+	_besteng=""
+	_last=""          # last non-error attempt, used only if nothing is ok
+	_lasteng=""
+	_idx=0
+	_tried_solve=0
+	[ "$_solve" = 0 ] && _tried_solve=2
+
+	for _e in $_chain; do
+		# skip engines that cannot produce this format at all
+		case "$_fmt" in
+			png) [ "$(cap "$_e" screenshot)" = no ] && continue ;;
+			pdf) [ "$(cap "$_e" pdf)" = no ] && continue ;;
+			links) case "$_e" in moli|lightpanda) continue ;; esac ;;
+		esac
+		_idx=$((_idx + 1))
+		if ! ensure_engine "$_e"; then
+			_attempts="$_attempts{\"engine\":\"$_e\",\"ok\":false,\"reason\":\"not-installed\"},"
+			continue
+		fi
+		_pf="$SB_RUNDIR/out.$_idx"
+		_ef="$SB_RUNDIR/err.$_idx"
+		_t0=$(date +%s 2>/dev/null || echo 0)
+		case "$_fmt" in
+			png|pdf)
+				ad_fetch "$_e" "$_fmt" "$_url" "$_pf" "$_t" >"$_ef" 2>&1
+				_rc=$?
+				;;
+			*)
+				ad_fetch "$_e" "$_fmt" "$_url" "" "$_t" >"$_pf" 2>"$_ef"
+				_rc=$?
+				;;
+		esac
+		_t1=$(date +%s 2>/dev/null || echo 0)
+		_dt=$((_t1 - _t0))
+
+		_v=error
+		if [ "$_rc" = 0 ]; then
+			if [ "$_fmt" = png ] || [ "$_fmt" = pdf ]; then
+				if [ -s "$_pf" ]; then _v=ok; else _v=thin; fi
+			else
+				_v=$(verdict "$_e" "$_pf" "$_ef" "$_min")
+			fi
+		fi
+		_attempts="$_attempts{\"engine\":\"$_e\",\"ok\":$([ "$_v" = ok ] && echo true || echo false),\"reason\":\"$_v\",\"exit\":$_rc,\"seconds\":$_dt},"
+
+		if [ "$_v" = ok ]; then
+			_besteng=$_e
+			_best=$_pf
+			break
+		fi
+		if [ "$_v" != error ] && [ -s "$_pf" ]; then
+			_last=$_pf
+			_lasteng=$_e
+		fi
+
+		# One solver pass when a browser produced a challenge page.
+		if [ "$_tried_solve" = 0 ] && { [ "$_v" = wall ] || [ "$_v" = thin ]; } &&
+		   [ -n "$(engine_bin nokk)" ]; then
+			_tried_solve=1
+			say "nokk: solving the challenge"
+			_sf="$SB_RUNDIR/solve.json"
+			if ad_solve "$_url" "${SB_SOLVE_WAIT:-30}" "${SB_SESSION:-}" > "$_sf" 2>/dev/null &&
+			   grep -q '"cf_clearance":true' "$_sf"; then
+				say "nokk: cleared, retrying"
+				_pf2="$SB_RUNDIR/solved.$_idx"
+				_ef2="$SB_RUNDIR/solved.err.$_idx"
+				if ad_fetch "$_e" "$_fmt" "$_url" "" "$_t" > "$_pf2" 2>"$_ef2"; then
+					_v2=$(verdict "$_e" "$_pf2" "$_ef2" "$_min")
+					_attempts="$_attempts{\"engine\":\"$_e+solve\",\"ok\":$([ "$_v2" = ok ] && echo true || echo false),\"reason\":\"$_v2\",\"exit\":0,\"seconds\":0},"
+					if [ "$_v2" = ok ]; then
+						_besteng=$_e
+						_best=$_pf2
+						break
+					fi
+					[ -s "$_pf2" ] && { _last=$_pf2; _lasteng=$_e; }
+				fi
+			else
+				say "nokk: solver did not clear the challenge"
+			fi
+		fi
+
+		[ "$_fallback" = 1 ] || break
+		say "$_e: $_v, escalating"
+	done
+
+	# nothing usable at all
+	if [ -z "$_best" ]; then
+		_json_out "$_url" "$_attempts" "$_last" "$_lasteng" "$_fmt"
+		die "sb get: every engine failed for $_url" 6
+	fi
+
+	_wall=false
+	is_wall "$_best" && _wall=true
+
+	case "$_fmt" in
+		png|pdf)
+			_dest=${_out:-}
+			if [ -z "$_dest" ]; then
+				_dest="./sb-$(slugify "$_url").$_fmt"
+			fi
+			cp "$_best" "$_dest" || die "sb get: cannot write $_dest" 3
+			if [ "$_json" = 1 ]; then
+				printf '{"ok":true,"engine":"%s","url":"%s","format":"%s","file":"%s","bytes":%s,"wall":%s,"attempts":[%s]}\n' \
+					"$_besteng" "$(printf '%s' "$_url" | json_escape)" "$_fmt" \
+					"$(printf '%s' "$_dest" | json_escape)" "$(bytes_of "$_dest")" "$_wall" \
+					"$(printf '%s' "$_attempts" | sed 's/,$//')"
+			else
+				say "$_fmt written to $_dest ($(bytes_of "$_dest") bytes, $_besteng)"
+			fi
+			[ "$_wall" = true ] && return 7
+			return 0
+			;;
+	esac
+
+	[ -n "$_out" ] && { cp "$_best" "$_out" || die "sb get: cannot write $_out" 3; }
+
+	if [ "$_json" = 1 ]; then
+		_meta=$(ad_meta "$_besteng" "$_url" "$_t")
+		if [ "$(bytes_of "$_best")" -le "$_max" ]; then
+			_txtj=$(json_file "$_best")
+		else
+			_txtj="null"
+		fi
+		printf '{"ok":true,"engine":"%s","url":"%s","format":"%s","bytes":%s,"wall":%s,"meta":%s,"text":%s,"attempts":[%s]}\n' \
+			"$_besteng" "$(printf '%s' "$_url" | json_escape)" "$_fmt" \
+			"$(bytes_of "$_best")" "$_wall" "$_meta" "$_txtj" \
+			"$(printf '%s' "$_attempts" | sed 's/,$//')"
+	else
+		cat "$_best"
+		[ -n "$_out" ] && say "$_fmt written to $_out ($(bytes_of "$_best") bytes, $_besteng)"
+	fi
+	if [ "$_wall" = true ]; then
+		say "sb: note: the page still looks like a bot wall ($_besteng). Try: sb solve $_url"
+		return 7
+	fi
+	return 0
+}
+
+# no-usable-output envelope: still says whether anything at all came back
+_json_out() { # url attempts lastfile lasteng format
+	[ "$1" ] || return 0
+	if [ "${_json:-0}" = 1 ]; then
+		if [ -n "$3" ] && [ -f "$3" ]; then
+			printf '{"ok":false,"url":"%s","format":"%s","error":"all-engines-failed","last_engine":"%s","text":%s,"attempts":[%s]}\n' \
+				"$(printf '%s' "$1" | json_escape)" "$5" "$4" "$(json_file "$3")" \
+				"$(printf '%s' "$2" | sed 's/,$//')"
+		else
+			printf '{"ok":false,"url":"%s","format":"%s","error":"all-engines-failed","attempts":[%s]}\n' \
+				"$(printf '%s' "$1" | json_escape)" "$5" \
+				"$(printf '%s' "$2" | sed 's/,$//')"
+		fi
+	fi
+	return 0
+}
+
+slugify() {
+	printf '%s' "$1" | sed 's|^[a-zA-Z]*://||; s|[^A-Za-z0-9._-]|_|g' | cut -c1-60
+}
+
+# best-effort metadata for the JSON envelope. Never fatal: an engine that
+# cannot report it contributes {}.
+ad_meta() { # engine url timeout
+	(
+		_e=$1
+		_u=$2
+		_t=$3
+		_b=$(engine_bin "$_e")
+		[ -n "$_b" ] || { printf '{}'; exit 0; }
+		case "$_e" in
+			nokk)
+				engine_exec "$_e" "$_t" "$_b" --log error --load "$_u" --json 2>/dev/null |
+					grep '^{' | tail -n 1 | grep . || printf '{}'
+				;;
+			obscura)
+				engine_exec "$_e" "$_t" "$_b" fetch "$_u" --stealth -q \
+					-e 'JSON.stringify({url:location.href,title:document.title})' 2>/dev/null |
+					grep '^{' | tail -n 1 | grep . || printf '{}'
+				;;
+			moli)
+				engine_exec "$_e" "$_t" "$_b" fetch --dump json "$_u" 2>/dev/null |
+					awk '/^[ \t]*"(final_url|status|title)"/ {
+						gsub(/^[ \t]*/, ""); sub(/,$/, "");
+						if (n++) printf ","; printf "%s", $0
+					} END { }' | sed 's/^/{/; s/$/}/' | grep . || printf '{}'
+				;;
+			lightpanda)
+				engine_exec "$_e" "$_t" "$_b" fetch "$_u" --dump html --json 2>/dev/null |
+					sed -n 's/.*"http_status":\([0-9][0-9]*\).*/{"status":\1}/p' | head -n 1 |
+					grep . || printf '{}'
+				;;
+			*)
+				printf '{}'
+				;;
+		esac
+	)
+}
+
+cmd_solve() {
+	_url=""
+	_wait=30
+	_session=""
+	_json=0
+	_cookies=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--wait|-w) _wait=${2:-30}; shift 2 ;;
+			--session) _session=${2:-}; shift 2 ;;
+			--save-cookies) _cookies=${2:-}; shift 2 ;;
+			--proxy) SB_PROXY_OPT=${2:-}; shift 2 ;;
+			--json) _json=1; shift ;;
+			-*) die "sb solve: unknown option $1" 2 ;;
+			*) [ -z "$_url" ] && _url=$1; shift ;;
+		esac
+	done
+	[ -n "$_url" ] || die "usage: sb solve URL [--wait SECONDS] [--session NAME] [--json]" 2
+	ensure_dirs
+	bootstrap || true
+	ensure_engine nokk || { ensure_dirs; install_engine nokk; }
+	[ -n "$(engine_bin nokk)" ] || die "nokk is needed to solve challenges" 3
+	_b=$(engine_bin nokk)
+	_extra=""
+	[ -n "$_session" ] && _extra="--session $_session --session-store $SB_STATE/nokk/sessions"
+	[ -n "$_cookies" ] && _extra="$_extra --export-cookies $_cookies"
+	[ -n "${SB_PROXY_OPT:-}" ] && _extra="$_extra --proxy $SB_PROXY_OPT"
+	_out="$SB_RUNDIR/solve.json"
+	# shellcheck disable=SC2086
+	engine_exec nokk "$((_wait + 60))" "$_b" --log error --load "$_url" \
+		--solve-challenge "$_wait" --json $_extra > "$_out" 2>"$SB_RUNDIR/solve.err"
+	_rc=$?
+	if [ "$_rc" != 0 ] || [ ! -s "$_out" ]; then
+		[ -s "$SB_RUNDIR/solve.err" ] && head -n 5 "$SB_RUNDIR/solve.err" >&2
+		die "sb solve: nokk failed (exit $_rc)" 6
+	fi
+	# nokk's logs may precede the JSON object; keep the last JSON line
+	_js="$SB_RUNDIR/solve.1.json"
+	grep '^{' "$_out" | tail -n 1 > "$_js" 2>/dev/null || cp "$_out" "$_js"
+	if [ ! -s "$_js" ]; then
+		[ -s "$_out" ] && head -n 5 "$_out" >&2
+		die "sb solve: nokk produced no JSON verdict" 6
+	fi
+	_clr=$(sed -n 's/.*"cf_clearance":\(true\|false\).*/\1/p' "$_js" | head -n 1)
+	_clr=${_clr:-false}
+	_found=$(sed -n 's/.*"found":"\([^"]*\)".*/\1/p' "$_js" | head -n 1)
+	_found=${_found:-none}
+	_up=$(sed -n 's/.*"still_up":\(true\|false\).*/\1/p' "$_js" | head -n 1)
+	_up=${_up:-false}
+
+	if [ "$_json" = 1 ]; then
+		cat "$_js"
+	elif [ "$_clr" = true ]; then
+		printf 'cleared: cf_clearance obtained (%s)\n' "$_url"
+		sed -n 's/.*"result":"\([^"]*\)".*/verdict: \1/p' "$_js"
+	elif [ "$_found" = none ]; then
+		printf 'no challenge to solve (%s)\n' "$_url"
+		sed -n 's/.*"title":"\([^"]*\)".*/title: \1/p' "$_js"
+	else
+		printf 'not cleared: no cf_clearance (%s)\n' "$_url"
+		printf 'challenge found: %s\n' "$_found"
+		printf 'still up: %s\n' "$_up"
+	fi
+
+	[ "$_clr" = true ] && return 0
+	[ "$_found" = none ] && return 0
+	return 7
+}
+
+cmd_shot() {
+	_url=""
+	_out=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--out|-o) _out=${2:-}; shift 2 ;;
+			--engine|-e) SB_ENGINE_SHOT=${2:-}; shift 2 ;;
+			-*) die "sb shot: unknown option $1" 2 ;;
+			*) [ -z "$_url" ] && _url=$1; shift ;;
+		esac
+	done
+	[ -n "$_url" ] || die "usage: sb shot URL [--out FILE] [--engine obscura|moli|lightpanda]" 2
+	_eng=${SB_ENGINE_SHOT:-auto}
+	cmd_get "$_url" --as png --engine "$_eng" ${_out:+--out "$_out"}
+}
+
+cmd_eval() {
+	_url=""
+	_js=""
+	_engine=obscura
+	_t=60
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--engine|-e) _engine=${2:-}; shift 2 ;;
+			--timeout) _t=${2:-60}; shift 2 ;;
+			-*) die "sb eval: unknown option $1" 2 ;;
+			*)
+				if [ -z "$_url" ]; then _url=$1; elif [ -z "$_js" ]; then _js=$1; fi
+				shift ;;
+		esac
+	done
+	[ -n "$_url" ] && [ -n "$_js" ] || die "usage: sb eval URL JS [--engine obscura|nokk|moli]" 2
+	[ "$(cap "$_engine" eval)" = yes ] || die "$_engine cannot evaluate JS (try obscura, nokk or moli)" 8
+	ensure_dirs
+	bootstrap || true
+	ensure_engine "$_engine" || die "$_engine: not installed (sb install $_engine)" 3
+	ad_eval "$_engine" "$_url" "$_js" "$_t"
+}
+
+cmd_run() {
+	_engine=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--) shift ;;
+			-*) die "sb run: the first argument must be the engine name" 2 ;;
+			*) _engine=$1; shift; break ;;
+		esac
+	done
+	[ -n "$_engine" ] || die "usage: sb run ENGINE [--] <upstream args...>" 2
+	# tolerate a separator after the engine name: sb run obscura -- fetch URL
+	[ "${1:-}" = "--" ] && shift
+	[ $# -gt 0 ] || die "sb run: nothing to run (put the upstream args after the engine)" 2
+	case " $SB_ALL " in
+		*" $_engine "*) ;;
+		*) die "sb run: unknown engine '$_engine' (known: $SB_ALL)" 2 ;;
+	esac
+	ensure_dirs
+	bootstrap || true
+	ensure_engine "$_engine" || die "$_engine: not installed (sb install $_engine)" 3
+	_b=$(engine_bin "$_engine")
+	[ -n "$_b" ] || die "$_engine: no binary" 3
+	# stdin is passed through here (sb run curl-impersonate -- -d @- ...), so
+	# exec directly rather than through engine_exec's /dev/null.
+	HOME="$SB_STATE/$_engine/home" \
+	XDG_CACHE_HOME="$SB_STATE/$_engine/cache" \
+	XDG_CONFIG_HOME="$SB_STATE/$_engine/config" \
+	XDG_DATA_HOME="$SB_STATE/$_engine/data" \
+	TMPDIR="$SB_STATE/$_engine/tmp" NO_COLOR=1 RUST_LOG=error \
+		exec "$_b" "$@"
+}
+
+# nokk and obscura both expose innerText without proper block-level newlines,
+# so text is rebuilt from the block elements. One expression, shared.
+SB_JS_TEXT='(function(){var b=document.body;if(!b)return "";var out=[];function walk(n){if(n.nodeType===1){var t=n.tagName.toLowerCase();if(t==="script"||t==="style"||t==="noscript")return;if(n.children.length===0){var x=(n.textContent||"").replace(/[ \t]+/g," ").replace(/^ +| +$/g,"");if(x)out.push(x);return;}var block=t==="div"||t==="section"||t==="article"||t==="header"||t==="footer"||t==="nav"||t==="main"||t==="p"||t==="li"||t==="tr"||t==="blockquote"||t==="pre";var before=out.length;for(var i=0;i<n.children.length;i++)walk(n.children[i]);if(block&&out.length>before)out.push("");}else if(n.nodeType===3){var v=(n.nodeValue||"").replace(/[ \t\n\r]+/g," ").replace(/^ +| +$/g,"");if(v)out.push(v);}}walk(b);var r=[];for(var i=0;i<out.length;i++){if(out[i]===""&&(r.length===0||r[r.length-1]===""))continue;r.push(out[i]);}return r.join("\n");})()'
+
+cmd_env() {
+	printf 'export SB_HOME="%s"\n' "$SB_HOME"
+	printf 'export PATH="%s:$PATH"\n' "$SB_BIN"
+}
+
+cmd_where() {
+	for _e in $SB_ALL; do
+		_b=$(engine_bin "$_e")
+		[ -n "$_b" ] && printf '%-18s %s\n' "$_e" "$_b"
+	done
+	return 0
+}
+
+cmd_verify() {
+	ensure_dirs
+	_bad=0
+	_any=0
+	for _e in $SB_ALL; do
+		_v=$(installed_version "$_e")
+		[ -z "$_v" ] && continue
+		_any=1
+		_rec="$SB_ENGINES/$_e/$_v/.sb-install"
+		_b=$(engine_bin "$_e")
+		if [ -z "$_b" ] || [ ! -x "$_b" ]; then
+			printf '%-18s %-12s MISSING BINARY\n' "$_e" "$_v"
+			_bad=1
+			continue
+		fi
+		_got=$(sha256_of "$_b")
+		_want=$(sed -n 's/^BIN_SHA256=//p' "$_rec" 2>/dev/null)
+		_orig=$(sed -n 's/^DOWNLOADSHA=//p' "$_rec" 2>/dev/null)
+		if [ -z "$_want" ]; then
+			printf '%-18s %-12s no recorded checksum (%s)\n' "$_e" "$_v" "$_rec"
+			_bad=1
+		elif [ "$_got" = "$_want" ]; then
+			printf '%-18s %-12s ok  %s\n' "$_e" "$_v" "$(basename "$_b")"
+		else
+			printf '%-18s %-12s MODIFIED\n' "$_e" "$_v"
+			printf '    recorded %s\n    actual   %s\n' "$_want" "$_got"
+			_bad=1
+		fi
+		[ -n "$_orig" ] && [ -f "$SB_CACHE/dl/$(sed -n 's/^ASSET=//p' "$_rec")" ] && {
+			_c=$(sha256_of "$SB_CACHE/dl/$(sed -n 's/^ASSET=//p' "$_rec")")
+			[ "$_c" = "$_orig" ] || printf '    cached archive checksum differs (%s)\n' "$_c"
+		}
+	done
+	if [ "$_any" = 0 ]; then
+		printf 'nothing installed under %s\n' "$SB_HOME"
+		return 0
+	fi
+	[ "$_bad" = 0 ] || return 5
+	return 0
+}
+
+cmd_update() {
+	_self=0
+	_check=0
+	for _a in "$@"; do
+		case "$_a" in
+			--self) _self=1 ;;
+			--check) _check=1 ;;
+		esac
+	done
+	if [ "$_self" = 1 ]; then
+		_self_update
+	fi
+	if [ "$_check" = 1 ]; then
+		printf '%-18s %-12s %-12s %s\n' engine pinned installed latest
+		for _e in $SB_ALL; do
+			printf '%-18s %-12s %-12s %s\n' "$_e" "$(engine_pinned_version "$_e")" \
+				"$(installed_version "$_e")" "$(latest_tag "$_e")"
+		done
+		return 0
+	fi
+	# no args: re-apply the pins (repair)
+	ensure_dirs
+	for _e in $SB_ALL; do
+		[ -n "$(installed_version "$_e")" ] || continue
+		install_engine "$_e" || true
+	done
+}
+
+_self_update() {
+	_src="$SB_SELF_URL"
+	_tmp="$SB_BIN/.sb.new.$$"
+	say "sb: fetching $_src"
+	if have curl; then
+		curl -fsSL --connect-timeout 20 -o "$_tmp" "$_src" || { rm -f "$_tmp"; die "sb: self-update download failed" 4; }
+	else
+		wget -q -O "$_tmp" "$_src" || { rm -f "$_tmp"; die "sb: self-update download failed" 4; }
+	fi
+	head -n 1 "$_tmp" | grep -q '^#!/bin/sh' || { rm -f "$_tmp"; die "sb: downloaded file is not the sb script" 5; }
+	sh -n "$_tmp" || { rm -f "$_tmp"; die "sb: downloaded script has a syntax error; refusing" 5; }
+	mkdir -p "$SB_BIN"
+	chmod 755 "$_tmp"
+	mv -f "$_tmp" "$SB_BIN/sb"
+	say "sb: updated -> $SB_BIN/sb ($("$SB_BIN/sb" version 2>/dev/null | head -n 1))"
+}
+
+cmd_doctor() {
+	_json=0
+	_live=0
+	for _a in "$@"; do
+		case "$_a" in
+			--json) _json=1 ;;
+			--live) _live=1 ;;
+		esac
+	done
+	ensure_dirs
+	_os=$(sb_os)
+	_arch=$(sb_arch)
+
+	if [ "$_json" = 1 ]; then
+		# Health first, so the envelope answers the question before the detail.
+		_healthy=true
+		for _e in $SB_ALL; do
+			[ -n "$(installed_version "$_e")" ] || continue
+			[ -x "$(engine_bin "$_e")" ] || _healthy=false
+		done
+		have curl || have wget || _healthy=false
+		have tar || _healthy=false
+		{ have sha256sum || have shasum || have openssl || have busybox; } || _healthy=false
+
+		printf '{"sb":"%s","os":"%s","arch":"%s","home":"%s","healthy":%s,"engines":{' \
+			"$SB_VERSION" "$_os" "$_arch" "$(printf '%s' "$SB_HOME" | json_escape)" "$_healthy"
+		_first=1
+		for _e in $SB_ALL; do
+			[ "$_first" = 1 ] || printf ','
+			_first=0
+			_b=$(engine_bin "$_e")
+			printf '"%s":{"pinned":"%s","installed":"%s","bin":"%s","desc":"%s"}' \
+				"$_e" "$(engine_pinned_version "$_e")" "$(installed_version "$_e")" \
+				"$(printf '%s' "$_b" | json_escape)" "$(engine_desc "$_e" | json_escape)"
+		done
+		printf '}'
+		if [ "$_live" = 1 ]; then
+			printf ',"live":{'
+			_first=1
+			for _e in $SB_ALL; do
+				[ -n "$(installed_version "$_e")" ] || continue
+				[ "$_first" = 1 ] || printf ','
+				_first=0
+				_o="$SB_RUNDIR/live.$_e"
+				if ad_fetch "$_e" text "https://example.com/" "" 30 > "$_o" 2>/dev/null && [ -s "$_o" ]; then
+					printf '"%s":{"ok":true,"bytes":%s}' "$_e" "$(bytes_of "$_o")"
+				else
+					printf '"%s":{"ok":false}' "$_e"
+				fi
+			done
+			printf '}'
+		fi
+		printf '}\n'
+		return 0
+	fi
+
+	printf 'sb %s\n' "$SB_VERSION"
+	printf 'platform   %s/%s\n' "$_os" "$_arch"
+	printf 'home       %s\n' "$SB_HOME"
+	_w=ok
+	( _t="$SB_HOME/.exectest"
+	  printf '#!/bin/sh\nexit 0\n' > "$_t" && chmod 755 "$_t" && "$_t" ) >/dev/null 2>&1 || _w=NOEXEC
+	rm -f "$SB_HOME/.exectest" 2>/dev/null
+	printf 'exec       %s\n' "$_w"
+	_miss=""
+	have curl || _miss="$_miss curl"
+	have wget || _miss="$_miss wget"
+	have tar || _miss="$_miss tar"
+	{ have sha256sum || have shasum || have openssl || have busybox; } || _miss="$_miss sha256"
+	have timeout || _miss="$_miss timeout(optional)"
+	[ -n "$_miss" ] && printf 'missing   %s\n' "$_miss"
+	printf '\n'
+	printf '%-18s %-12s %-12s %s\n' engine pinned installed binary
+	for _e in $SB_ALL; do
+		_b=$(engine_bin "$_e")
+		printf '%-18s %-12s %-12s %s\n' "$_e" "$(engine_pinned_version "$_e")" \
+			"$(installed_version "$_e")" "${_b:--}"
+	done
+	if [ "$_live" = 1 ]; then
+		printf '\nlive check (only installed engines):\n'
+		for _e in $SB_ALL; do
+			[ -n "$(installed_version "$_e")" ] || continue
+			_o="$SB_RUNDIR/live.$_e"
+			if ad_fetch "$_e" text "https://example.com/" "" 30 > "$_o" 2>/dev/null && [ -s "$_o" ]; then
+				printf '  %-18s ok (%s bytes)\n' "$_e" "$(bytes_of "$_o")"
+			else
+				printf '  %-18s FAILED\n' "$_e"
+			fi
+		done
+	fi
+	return 0
+}
+
+cmd_version() {
+	printf 'sb %s\n' "$SB_VERSION"
+	for _e in $SB_ALL; do
+		_v=$(installed_version "$_e")
+		[ -n "$_v" ] && printf '%s %s\n' "$_e" "$_v"
+	done
+	return 0
+}
+
+cmd_help() {
+	_topic=${1:-}
+	case "$_topic" in
+		get) cat >&2 <<'EOF'
+sb get URL [--as text|markdown|html|links|png|pdf] [--out FILE] [--json]
+
+  Fetches a page and prints the result. Without --engine, it tries engines in
+  a chain and escalates when it hits a bot wall or gets too little text:
+
+      curl-impersonate -> nokk -> obscura -> lightpanda -> moli
+
+  curl-impersonate first because it is 0.6 s and 12 MiB and, per the s-browse
+  measurements, retrieves more raw content than any browser. When it gets a
+  wall or under --min-chars of text, nokk takes over (it ships a Cloudflare
+  solver), then obscura (real render), then lightpanda (cheap bulk text).
+
+  --as png    obscura -> moli -> lightpanda   (lightpanda paints text only)
+  --as pdf    moli -> lightpanda              (obscura has no CLI pdf)
+  --as links  obscura -> curl-impersonate
+
+  --engine E       use one engine, no escalation
+  --min-chars N    escalate below N chars of text (default 40, 0 disables)
+  --max-bytes N    cap the text embedded by --json (default 200000)
+  --no-fallback    one attempt only
+  --no-solve       never run the solver pass
+  --timeout S      per attempt (default 60)
+  --proxy URL      route through a proxy; passed to every engine that takes one
+                   (obscura, nokk, lightpanda, moli, curl-impersonate)
+
+  exit 0 ok, 6 no output, 7 wall still up (output is the best attempt)
+
+  sb get https://example.com
+  sb get https://example.com --as markdown --engine obscura
+  sb get https://example.com --as png --out page.png
+  sb get https://example.com --json | jq -r .engine,.meta.title
+EOF
+		;;
+		solve) cat >&2 <<'EOF'
+sb solve URL [--wait SECONDS] [--session NAME] [--save-cookies FILE] [--json]
+
+  Drives nokk's Cloudflare/Turnstile solver, waits up to --wait seconds
+  (default 30) for the widget, and reports the verdict. Exit 0 only when a
+  cf_clearance cookie was actually obtained.
+
+  --session NAME       keep the cookie jar under $SB_HOME/state/nokk/sessions
+                       so the next sb solve / sb run reuses the clearance
+  --save-cookies FILE  write a Netscape cookies.txt (curl, wget, yt-dlp)
+  --json               nokk's own JSON: status, challenge, cookies, final_url
+
+  Clearing is probabilistic and depends on the exit IP; --retries is available
+  through sb run. Nothing else in this toolbox solves a challenge.
+EOF
+		;;
+		install) cat >&2 <<'EOF'
+sb install [ENGINE...] [--latest] [--no-verify]
+
+  Idempotent. With no arguments it ensures the core set is present:
+  nokk, obscura, lightpanda, curl-impersonate. moli: sb install moli, all: sb install all.
+
+  Every download is pinned to an exact version and upstream sha256. Re-running
+  is safe and cheap: an installed engine is left alone.
+
+  --latest      resolve the newest upstream tag and install it. Unpinned, so
+                integrity cannot be checked; sb prints the sha256 and a
+                ready-to-paste manifest line, which is how a pin moves.
+  --no-verify   skip the sha256 check (with --latest).
+
+  Mirror: SB_MIRROR=https://my.mirror/  replaces https://github.com/ in URLs.
+  Offline: drop the release assets into $SB_HOME/cache/dl/ yourself.
+EOF
+		;;
+		run) cat >&2 <<'EOF'
+sb run ENGINE -- <upstream args...>
+
+  The escape hatch. Runs the pinned binary with your arguments, unchanged,
+  inside the hermetic environment. Use it for any flag sb does not wrap yet,
+  or any new upstream flag - you never have to patch sb for that.
+
+  sb run obscura -- fetch https://example.com --dump cookies
+  sb run lightpanda -- serve --unix-socket /tmp/cdp.sock
+  sb run nokk -- --load https://example.com --solve-challenge 30 --json
+  sb run curl-impersonate -- --impersonate firefox147 -sSL https://example.com
+EOF
+		;;
+		*)
+			cat <<EOF
+sb $SB_VERSION - one command to a working single-binary headless browser.
+
+usage: sb <command> [args]
+
+  install    ensure the engines are installed (idempotent, pinned, verified)
+  get        fetch a URL as text|markdown|html|links|png|pdf, escalating past walls
+  solve      clear a Cloudflare/JS challenge (nokk) and report the verdict
+  shot       screenshot a URL to a file
+  eval       run JavaScript in a page and print the result
+  run        run an engine with raw upstream flags (escape hatch)
+  engines    capability matrix
+  list       what is installed
+  env        print the PATH exports
+  where      absolute paths of the binaries
+  doctor     environment and engine health (--live, --json)
+  verify     re-check installed files against recorded checksums
+  update     --check upstream versions, --self update this script
+  uninstall  remove engines (--all)
+  version    sb and engine versions
+
+core engines: $SB_CORE
+extra:        $SB_EXTRA
+
+  sb get https://example.com
+  sb get https://example.com --as markdown
+  sb solve https://www.scrapingcourse.com/cloudflare-challenge
+  sb shot https://example.com --out page.png
+  sb eval https://example.com 'document.title'
+  sb run obscura -- fetch https://example.com --dump cookies
+
+Help: sb help get|solve|install|run    Full manual: sb man
+EOF
+			;;
+	esac
+	return 0
+}
+
+cmd_man() {
+	cat <<EOF
+SB(1)                        sb $SB_VERSION                        SB(1)
+
+NAME
+     sb - install, configure and drive single-binary headless browsers
+
+SYNOPSIS
+     sb install [ENGINE...] [--latest] [--no-verify]
+     sb get URL [--as FMT] [--engine E] [--out FILE] [--json] [--timeout S]
+     sb solve URL [--wait S] [--session NAME] [--save-cookies FILE] [--json]
+     sb shot URL [--out FILE] [--engine E]
+     sb eval URL JS [--engine E]
+     sb run ENGINE -- ARGS...
+     sb engines | list | where | env | verify
+     sb doctor [--live] [--json]
+     sb update [--check] [--self]
+     sb uninstall ENGINE... | --all
+     sb version | help | man
+
+DESCRIPTION
+     sb installs four upstream programs into one prefix and gives them one
+     honest interface. It does not wrap them in a daemon, does not need root,
+     and writes nothing outside \$SB_HOME (default ~/.local/share/sb).
+
+     The three browsers are the ones that came out on top of a 16-tool,
+     24-site measurement sweep (24 hostile sites, 7 challenge pages, TLS
+     fingerprints, cold start, peak RSS), and curl-impersonate is there
+     because it beat every browser in that sweep on raw content retrieval.
+
+WHY EACH ONE
+     nokk              the only tool in the corpus that clears a Cloudflare
+                       gate by itself and keeps cf_clearance in a cookie jar.
+                       No pixels, no screenshot.
+     obscura --stealth the best full engine: renders, screenshots, CDP, MCP,
+                       Chrome-family JA4, ~40 MiB, 0.14 s. Does not solve.
+     lightpanda        smallest peak RSS of the engines (25 MiB) and fine for
+                       bulk text, but self-identifies as Lightpanda and its
+                       canvas is a stub. Never trust it on a fingerprinted site.
+     moli              best one-shot form automation, UA consistent at HTTP and
+                       JS level, layout opt-in. Heaviest of the four.
+     curl-impersonate  no JavaScript at all, but a byte-exact Chrome 152
+                       ClientHello at 12 MiB and 0.6 s. First attempt for text.
+
+     Measured on one datacenter IP, single run per site. See RESEARCH.md.
+
+ESCALATION
+     sb get starts cheap and gets expensive only when it must. A challenge
+     page is recognised by the same markers the corpus used, so a wall that
+     curl-impersonate cannot pass is escalated to nokk instead of being
+     returned as if it were content.
+
+HERMETIC
+     Downloads land in \$SB_HOME/cache/dl and are checked against the pinned
+     sha256 before extraction. Installs are staged and moved into place
+     atomically; a failed install leaves the previous version active. Every
+     engine runs with HOME, XDG_* and TMPDIR pointed into \$SB_HOME/state, so
+     nothing appears in your real ~/.cache. No root, no package manager.
+
+IDEMPOTENT
+     sb install is safe to run any number of times. An engine that is already
+     installed at the pinned version is not re-downloaded. sb update re-applies
+     the pins; sb verify detects a modified or truncated install.
+
+UPDATING
+     sb update --check     compare pinned, installed and newest upstream tags
+     sb update --self      replace this script with the one on main
+     sb install E --latest --no-verify
+                           try the newest upstream release without waiting
+                           for a pin; sb prints the sha256 and the manifest
+                           line to pin it with
+
+     Upstream bugs therefore never require editing sb: --latest installs a
+     different version, sb run passes flags sb does not know, and the adapter
+     for a renamed flag is one line in ad_fetch().
+
+FILES
+     \$SB_HOME/engines/E/V/        one directory per engine and version
+     \$SB_HOME/engines/E/current   symlink to the active version
+     \$SB_HOME/bin/                sb and one wrapper per engine (PATH)
+     \$SB_HOME/state/E/            HOME, XDG_*, TMPDIR for that engine
+     \$SB_HOME/cache/dl/           downloaded release assets
+     \$SB_HOME/engines/E/V/.sb-install  version, url, sha256, bin
+
+ENVIRONMENT
+     SB_HOME           install prefix              (~/.local/share/sb)
+     SB_MIRROR         replaces https://github.com/ in asset URLs
+     SB_AUTO_INSTALL   0 disables install-on-first-use
+     SB_CHAIN          override the default escalation chain
+     SB_SELF_URL       where sb update --self fetches from
+     SB_CI_PROFILE     curl-impersonate profile (chrome152)
+     SB_PROXY_OPT      proxy handed to every engine that takes one
+                       (usually set by `sb get --proxy URL`, not by hand)
+
+EXIT CODES
+     0 ok   2 usage   3 missing dependency/platform   4 download
+     5 checksum/unpack   6 engine failed   7 wall still up   8 unsupported
+
+NOTES
+     In a sandbox that denies bind(2), the CDP servers (obscura serve,
+     moli serve, lightpanda serve) cannot start. lightpanda can still serve
+     over a unix socket:
+         sb run lightpanda -- serve --unix-socket /tmp/cdp.sock
+
+     Nothing here bypasses authentication, and nothing should be pointed at a
+     site whose terms forbid it. A solver that works means the site chose a
+     challenge, not that the operator consented.
+
+0BSD. We aim to provide the software that shapes the world of tomorrow.
+EOF
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+_cmd=${1:-help}
+[ $# -gt 0 ] && shift
+
+case "$_cmd" in
+	install)	cmd_install "$@" ;;
+	uninstall|remove)	cmd_uninstall "$@" ;;
+	list|ls)	cmd_list "$@" ;;
+	engines|caps)	cmd_engines "$@" ;;
+	get|fetch)	cmd_get "$@" ;;
+	solve)		cmd_solve "$@" ;;
+	shot|screenshot)	cmd_shot "$@" ;;
+	eval)		cmd_eval "$@" ;;
+	run)		cmd_run "$@" ;;
+	env)		cmd_env "$@" ;;
+	where)		cmd_where "$@" ;;
+	verify)		cmd_verify "$@" ;;
+	doctor)		cmd_doctor "$@" ;;
+	update)		cmd_update "$@" ;;
+	version|--version|-V)	cmd_version "$@" ;;
+	help|--help|-h)	cmd_help "$@" ;;
+	man|manual)	cmd_man "$@" ;;
+	*)		warn "unknown command: $_cmd (sb help)"; cmd_help; exit 2 ;;
+esac
+exit $?

@@ -1,0 +1,6 @@
+# sb writes nothing here; these are just working files that should not travel.
+*.part
+*.tmp
+sb-*.png
+sb-*.pdf
+/tmp/

@@ -1,0 +1,92 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # upstream moves; a pin that stops resolving should be noticed, not
+    # discovered by whoever needed a browser that day
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: offline checks (no network, no download)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax
+        run: |
+          sh -n sb
+          sh -n test.sh
+      - name: dash (strict POSIX)
+        if: runner.os == 'Linux'
+        run: dash -n sb && dash -n test.sh
+      - name: offline suite
+        run: sh ./test.sh
+
+  install:
+    name: clean install + live
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install into a throwaway prefix and run everything
+        run: sh ./test.sh --install
+      - name: the one-command start
+        run: |
+          export SB_HOME="$RUNNER_TEMP/sb"
+          cat ./sb | sh -s -- get https://example.com | tee out.txt
+          grep -qi example out.txt
+      - name: stdout stays clean
+        run: |
+          export SB_HOME="$RUNNER_TEMP/sb"
+          test "$(sh ./sb get https://example.com 2>/dev/null | wc -c)" -gt 50
+      - name: doctor --json parses
+        run: |
+          export SB_HOME="$RUNNER_TEMP/sb"
+          sh ./sb doctor --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["healthy"] is True'
+      - name: get --json parses
+        run: |
+          export SB_HOME="$RUNNER_TEMP/sb"
+          sh ./sb get https://example.com --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["engine"]'
+
+  pins:
+    name: every pin still resolves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check each asset URL answers 200
+        run: |
+          set -u
+          grep -E '^[a-z-]+\|v?[0-9]' sb | grep '|linux|x86_64|' > /tmp/pins.txt
+          broken=0
+          for e in nokk obscura lightpanda moli curl-impersonate; do
+            case "$e" in
+              nokk) repo=koloss777/nokk ;;
+              obscura) repo=h4ckf0r0day/obscura ;;
+              lightpanda) repo=lightpanda-io/browser ;;
+              moli) repo=lexmount/moli ;;
+              curl-impersonate) repo=lexiforest/curl-impersonate ;;
+            esac
+            line=$(grep "^$e|" /tmp/pins.txt || true)
+            [ -n "$line" ] || { echo "no pin for $e"; broken=1; continue; }
+            tag=$(printf '%s' "$line" | cut -d'|' -f2)
+            ver=$(printf '%s' "$line" | cut -d'|' -f3)
+            tmpl=$(printf '%s' "$line" | cut -d'|' -f7)
+            asset=$(printf '%s' "$tmpl" | sed "s|@T@|$tag|")
+            url="https://github.com/$repo/releases/download/$tag/$asset"
+            code=$(curl -sSIL -o /dev/null -w '%{http_code}' "$url" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "ok     $e $ver"
+            else
+              echo "BROKEN $e $ver -> $code"
+              echo "       $url"
+              broken=1
+            fi
+          done
+          exit "$broken"
