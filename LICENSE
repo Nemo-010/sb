@@ -10,17 +10,3 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
-
----
-
-sb downloads and runs third-party programs. Their licences are theirs, not
-this one's:
-
-  nokk              Apache-2.0    https://github.com/koloss777/nokk
-  obscura           Apache-2.0    https://github.com/h4ckf0r0day/obscura
-  lightpanda        AGPL-3.0      https://github.com/lightpanda-io/browser
-  moli              Apache-2.0    https://github.com/lexmount/moli
-  curl-impersonate  MIT           https://github.com/lexiforest/curl-impersonate
-
-sb does not modify, bundle or redistribute them; it fetches the upstream
-release assets at install time and runs them as separate programs.
