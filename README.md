@@ -235,7 +235,8 @@ test for POSIX sh's lack of `local`), and that a tampered binary is detected.
 [`docs/architecture.md`](docs/architecture.md) explains the layout, the design
 decisions worth keeping, and how to add an engine or move a pin without
 touching logic. [`docs/corpus.md`](docs/corpus.md) is the index of the
-measurement corpus the engine choice comes from.
+measurement corpus the engine choice comes from. [`ARCHIVE.md`](ARCHIVE.md)
+lists the other places this repo is published and how to recover from them.
 
 ## Notes and limits
 
