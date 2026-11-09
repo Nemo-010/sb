@@ -228,10 +228,6 @@ installed_version() { # engine -> version or empty
 	readlink "$SB_ENGINES/$1/current" 2>/dev/null | sed 's|.*/||'
 }
 
-engine_root() { # engine -> dir of the active install
-	printf '%s\n' "$SB_ENGINES/$1/current"
-}
-
 engine_bin() { # engine -> absolute path to the binary, or empty
 	_er="$SB_ENGINES/$1/current"
 	[ -d "$_er" ] || return 0
@@ -1240,16 +1236,24 @@ cmd_solve() {
 cmd_shot() {
 	_url=""
 	_out=""
+	_eng=auto
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--out|-o) _out=${2:-}; shift 2 ;;
-			--engine|-e) SB_ENGINE_SHOT=${2:-}; shift 2 ;;
+			--engine|-e) _eng=${2:-auto}; shift 2 ;;
 			-*) die "sb shot: unknown option $1" 2 ;;
 			*) [ -z "$_url" ] && _url=$1; shift ;;
 		esac
 	done
 	[ -n "$_url" ] || die "usage: sb shot URL [--out FILE] [--engine obscura|moli|lightpanda]" 2
-	_eng=${SB_ENGINE_SHOT:-auto}
+	case " $SB_ALL " in
+		*" $_eng "*) ;;
+		*)
+			if [ "$_eng" != auto ]; then
+				die "sb shot: unknown engine '$_eng'" 2
+			fi
+			;;
+	esac
 	cmd_get "$_url" --as png --engine "$_eng" ${_out:+--out "$_out"}
 }
 
