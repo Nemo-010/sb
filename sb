@@ -19,6 +19,14 @@ SB_SELF_URL="${SB_SELF_URL:-https://raw.githubusercontent.com/Nemo-010/sb/main/s
 # paths
 # ---------------------------------------------------------------------------
 SB_HOME="${SB_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/sb}"
+# The prefix must be absolute. Everything recorded inside it (the binary path in
+# .sb-install, the wrapper exec lines, the paths a shell hands to an engine) is
+# used from other working directories, and a relative prefix silently produces
+# paths that exist only from wherever sb happened to be invoked.
+case "$SB_HOME" in
+	/*) ;;
+	*) SB_HOME="$PWD/${SB_HOME#./}" ;;
+esac
 SB_ENGINES="$SB_HOME/engines"
 SB_STATE="$SB_HOME/state"
 SB_CACHE="$SB_HOME/cache"
@@ -84,7 +92,7 @@ curl-impersonate|no|no|no|no|no|no|no|no
 
 # wall markers, adopted from the s-browse corpus classifier. Tuned to
 # under-report a wall rather than over-report one.
-SB_WALL_RE='just a moment|checking your browser|enable javascript and cookies|cf-mitigated|challenge-platform|verify you are (a )?human|are you a robot|unusual traffic|access denied|attention required|incapsula|pardon our interruption|ddos protection|press (&|and) hold|please complete the security check|验证码|人机验证|安全验证|滑动验证|拒绝访问|访问受限|异常访问|请完成验证'
+SB_WALL_RE='just a moment|checking your browser|performing security verification|verifying you are (a )?human|enable javascript and cookies|cf-mitigated|cf-chl|challenge-platform|verify you are (a )?human|are you a robot|unusual traffic|access denied|attention required|incapsula|pardon our interruption|ddos protection|press (&|and) hold|please complete the security check|请稍候|验证码|人机验证|安全验证|滑动验证|拒绝访问|访问受限|异常访问|请完成验证'
 
 # ---------------------------------------------------------------------------
 # tiny utilities
@@ -403,20 +411,23 @@ install_engine() { # engine [--latest] [--no-verify]
 					;;
 			esac
 
-			_rel=$(find "$_stage" -maxdepth 3 -type f -name "$_binname" 2>/dev/null | head -n 1)
-			if [ -z "$_rel" ]; then
+			if [ -z "$(find "$_stage" -maxdepth 3 -type f -name "$_binname" 2>/dev/null | head -n 1)" ]; then
 				rm -rf "$_stage"
 				die "$_eng: $_asset does not contain $_binname" 5
 			fi
-			case "$_rel" in
-				/*) _rel=$(printf '%s' "$_rel" | sed "s|^$_stage/||") ;;
-				*) _rel=$(printf '%s' "$_rel" | sed "s|^\./||") ;;
-			esac
-			chmod 755 "$_stage/$_rel" 2>/dev/null
 
 			rm -rf "$_vdir"
 			mkdir -p "$(dirname "$_vdir")"
 			mv "$_stage" "$_vdir" || die "$_eng: cannot move staging dir into place" 3
+			# Resolve the binary relative to the install dir itself, so the
+			# recorded path is correct whatever the staging directory was called.
+			_rel=$(cd "$_vdir" && find . -maxdepth 3 -type f -name "$_binname" 2>/dev/null |
+				head -n 1 | sed 's|^\./||')
+			if [ -z "$_rel" ]; then
+				rm -rf "$_vdir"
+				die "$_eng: $_asset does not contain $_binname" 5
+			fi
+			chmod 755 "$_vdir/$_rel" 2>/dev/null
 			_binsha=$(sha256_of "$_vdir/$_rel")
 			{
 				echo "ENGINE=$_eng"
@@ -1055,8 +1066,14 @@ cmd_get() {
 		say "$_e: $_v, escalating"
 	done
 
-	# nothing usable at all
-	if [ -z "$_best" ]; then
+	# Nothing met the bar. If what came back is a bot wall, the honest answer is
+	# "the wall is still up" (exit 7) with that page printed - not "nothing
+	# came back" (exit 6), which would tell a caller there is no output to look
+	# at when there is.
+	if [ -z "$_best" ] && [ -n "$_last" ] && is_wall "$_last"; then
+		_best=$_last
+		_besteng=$_lasteng
+	elif [ -z "$_best" ]; then
 		_json_out "$_url" "$_attempts" "$_last" "$_lasteng" "$_fmt"
 		die "sb get: every engine failed for $_url" 6
 	fi

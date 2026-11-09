@@ -26,7 +26,13 @@ done
 # A full --install suite needs ~600 MB (four engines plus their archives).
 # /tmp is often a small tmpfs, so prefer TMPDIR when the caller set one and
 # fall back to the current directory, which is writable by definition.
-ROOT=$(mktemp -d "${SB_TEST_ROOT:-${TMPDIR:-.}}/sb-test.XXXXXX") || exit 1
+_root_base=${SB_TEST_ROOT:-${TMPDIR:-.}}
+# mktemp -d with a relative -p yields a relative path, and a relative ROOT then
+# makes every $ROOT/... in this script resolve from whatever directory a later
+# cd leaves us in. Anchor it once, here.
+mkdir -p "$_root_base" 2>/dev/null
+_root_base=$(cd "$_root_base" && pwd) || exit 1
+ROOT=$(mktemp -d "$_root_base/sb-test.XXXXXX") || exit 1
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 export HOME="$ROOT/home"
 export SB_HOME="$ROOT/sb"
@@ -161,6 +167,41 @@ done > "$ROOT/.bad"
 if [ -s "$ROOT/.bad" ]; then no "manifest digests: $(cat "$ROOT/.bad")"; else ok "every manifest digest is 64 hex chars"; fi
 
 # ---------------------------------------------------------------------------
+section "classification (offline, stub engine)"
+	# A deterministic probe of the wall/exit-code contract, with no network and
+	# no download: a stub engine that prints a wall body is installed under a
+	# throwaway prefix, so `sb get` sees exactly one outcome.
+	_stub="$ROOT/stub"
+	mkdir -p "$_stub/home" "$_stub/sb/engines/curl-impersonate/1.0"
+	printf '#!/bin/sh\nprintf "Just a moment...\\nEnable JavaScript and cookies to continue\\n"\n' \
+		> "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
+	chmod 755 "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
+	ln -s 1.0 "$_stub/sb/engines/curl-impersonate/current"
+	printf 'ENGINE=curl-impersonate\nVERSION=1.0\nBIN=curl-impersonate\nBIN_SHA256=x\n' \
+		> "$_stub/sb/engines/curl-impersonate/1.0/.sb-install"
+	_sout=$(HOME="$_stub/home" SB_HOME="$_stub/sb" SB_SOLVE=0 sh "$SB_SRC" \
+		get https://example.invalid/ --engine curl-impersonate --no-solve 2>/dev/null)
+	_src=$?
+	if [ "$_src" = 7 ]; then
+		ok "a wall body with nothing behind it exits 7, not 6"
+	else
+		no "wall-only outcome exited $_src, wanted 7"
+	fi
+	if printf '%s' "$_sout" | grep -q 'Just a moment'; then
+		ok "the wall page is still printed on exit 7"
+	else
+		no "exit 7 printed no body ($_sout)"
+	fi
+
+	# a clean body must not be mistaken for a wall
+	printf '#!/bin/sh\nprintf "A real page with several lines of ordinary content, long enough to pass the minimum.\\n"\n' \
+		> "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
+	_cout=$(HOME="$_stub/home" SB_HOME="$_stub/sb" sh "$SB_SRC" \
+		get https://example.invalid/ --engine curl-impersonate 2>/dev/null)
+	_crc=$?
+	if [ "$_crc" = 0 ]; then ok "a clean body exits 0"; else no "clean body exited $_crc"; fi
+	rm -rf "$_stub"
+
 section "failure modes that must not look like success"
 # ---------------------------------------------------------------------------
 if [ "$INSTALL" = 0 ]; then
@@ -266,6 +307,43 @@ section "clean install"
 		no "bootstrap did not leave sb behind"
 	fi
 	rm -rf "$_fresh"
+
+	# Regression: CI ran test.sh with TMPDIR unset, mktemp -d produced a
+	# relative ROOT, and every $ROOT/... check then resolved from the wrong
+	# directory. Anchor the root and assert it is absolute.
+	case "$ROOT" in
+		/*) ok "test root is an absolute path" ;;
+		*) no "test root is relative ($ROOT)" ;;
+	esac
+
+	# Regression: a relative SB_HOME used to record a binary path that leaked
+	# the staging directory (".stage.NNN"), so every wrapper and every
+	# `sb verify` after it was wrong. The prefix is anchored to $PWD now.
+	_relhome="$ROOT/relhome"
+	mkdir -p "$_relhome/home"
+	if ( cd "$_relhome" && HOME="$_relhome/home" SB_HOME="./rel/sb" sh "$SB_SRC" install ) \
+		>"$_relhome/out" 2>"$_relhome/err"; then
+		_bin=$(sed -n 's/^BIN=//p' "$_relhome/rel/sb/engines/nokk/current/.sb-install" 2>/dev/null)
+		case "$_bin" in
+			*stage*) no "relative SB_HOME recorded a staging path ($_bin)" ;;
+			''|/*)   no "relative SB_HOME recorded a bad path ($_bin)" ;;
+			*)       ok "relative SB_HOME records a clean binary path ($_bin)" ;;
+		esac
+		if [ -x "$_relhome/rel/sb/bin/nokk" ]; then
+			ok "relative SB_HOME still writes engine wrappers"
+		else
+			no "relative SB_HOME wrote no wrapper"
+		fi
+		if ( cd "$_relhome" && HOME="$_relhome/home" SB_HOME="./rel/sb" sh "$SB_SRC" verify ) \
+			>"$_relhome/vout" 2>&1; then
+			ok "relative SB_HOME verifies clean"
+		else
+			no "relative SB_HOME verify failed: $(head -c 150 "$_relhome/vout")"
+		fi
+	else
+		no "install with a relative SB_HOME failed: $(tail -2 "$_relhome/err" | tr '\n' ' ')"
+	fi
+	rm -rf "$_relhome"
 
 	# a tampered binary must be detected
 	_lt="$SB_HOME/engines/lightpanda/current/bin/lightpanda"

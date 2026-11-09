@@ -28,7 +28,11 @@ jobs:
         if: runner.os == 'Linux'
         run: dash -n sb && dash -n test.sh
       - name: offline suite
-        run: sh ./test.sh
+        # also with TMPDIR unset, which is what made mktemp -d hand back a
+        # relative path and break every path check in the suite
+        run: |
+          sh ./test.sh
+          env -u TMPDIR sh ./test.sh
 
   install:
     name: clean install + live
@@ -36,6 +40,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install into a throwaway prefix and run everything
+        # the working directory, not /tmp: a full run is ~600 MB
+        env:
+          SB_TEST_ROOT: ${{ runner.temp }}/sb-test-root
         run: sh ./test.sh --install
       - name: the one-command start
         run: |
