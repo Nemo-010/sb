@@ -6,9 +6,9 @@ the push. Re-check with `ghless status --check`.
 
 | lane | where | state |
 |---|---|---|
-| GitHub | https://github.com/Nemo-010/sb | head `14655dc` |
-| Nostr (ngit/GRASP) | `nostr://npub15a8d7sdksj773eu7vtgxda4s34w7g3u8vagvgqvcsrn80ck9ymwqg7d97z/relay.ngit.dev/sb` | head `14655dc`, clone verified |
-| Arweave | `arweave://TlAQ65mkOntVSRBiw9K8213c6vVrNqn8NUwpC3Mxvdg/sb` (tx `_RwzwwQ0YkqKfsrn5Fz6IHUo3QHnc9PPEUm_glcjLgA`) | head `14655dc`, clone verified |
+| GitHub | https://github.com/Nemo-010/sb | head `f83512f` |
+| Nostr (ngit/GRASP) | `nostr://npub15a8d7sdksj773eu7vtgxda4s34w7g3u8vagvgqvcsrn80ck9ymwqg7d97z/relay.ngit.dev/sb` | head `f83512f`, clone verified |
+| Arweave | `arweave://TlAQ65mkOntVSRBiw9K8213c6vVrNqn8NUwpC3Mxvdg/sb` (tx `_Jv4rXkdwKeNcSyqq2Bbie54GfUsAT9FBBVhBmzNtPo`) | head `f83512f`, clone verified |
 | Software Heritage | `swh:1:snp:810294ccdc983447bef69f00cc1ae831b0bbc4aa` | full visit |
 | Local archive | git bundles, patch series, tarball, SHA-256 manifest, zip | in the ghless data dir |
 
