@@ -1696,7 +1696,7 @@ ENVIRONMENT
      SB_SELF_URL       where sb update --self fetches from
      SB_CI_PROFILE     curl-impersonate profile (chrome152)
      SB_PROXY_OPT      proxy handed to every engine that takes one
-                       (usually set by `sb get --proxy URL`, not by hand)
+                       (usually set by sb get --proxy URL, not by hand)
 
 EXIT CODES
      0 ok   2 usage   3 missing dependency/platform   4 download
