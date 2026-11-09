@@ -219,12 +219,16 @@ yourself and `sb install` will verify and use them.
 ```sh
 ./test.sh             # 43 offline checks, no network
 ./test.sh --live      # + real fetches through every engine (52)
-./test.sh --install   # + a clean install into a throwaway prefix (70)
+./test.sh --install   # + a clean install into a throwaway prefix (72)
 ```
 
 Each run gets its own `SB_HOME` under a temp dir and removes it on exit; the
-real one is never touched. `--install` also verifies idempotency, hermeticity,
-that the install leaves a runnable `sb`, and that a tampered binary is detected.
+real one is never touched. `--install` needs about 600 MB, so set
+`SB_TEST_ROOT` if `/tmp` is a small tmpfs.
+
+`--install` also verifies idempotency, hermeticity, that the install leaves a
+runnable `sb`, that the very first fetch after a bootstrap works (a regression
+test for POSIX sh's lack of `local`), and that a tampered binary is detected.
 
 ## Changing it
 

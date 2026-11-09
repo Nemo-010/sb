@@ -6,7 +6,8 @@
 #   ./test.sh --install    # also do a clean install into a throwaway SB_HOME
 #
 # Nothing here touches the real $SB_HOME: every run gets its own directory
-# under a temp root, which is removed on exit.
+# under a temp root, which is removed on exit. Set SB_TEST_ROOT to choose
+# where that root goes; --install needs about 600 MB.
 #
 # SPDX-License-Identifier: 0BSD
 set -u
@@ -22,7 +23,10 @@ for a in "$@"; do
 	esac
 done
 
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sb-test.XXXXXX") || exit 1
+# A full --install suite needs ~600 MB (four engines plus their archives).
+# /tmp is often a small tmpfs, so prefer TMPDIR when the caller set one and
+# fall back to the current directory, which is writable by definition.
+ROOT=$(mktemp -d "${SB_TEST_ROOT:-${TMPDIR:-.}}/sb-test.XXXXXX") || exit 1
 trap 'rm -rf "$ROOT"' EXIT INT TERM
 export HOME="$ROOT/home"
 export SB_HOME="$ROOT/sb"
@@ -234,6 +238,35 @@ section "clean install"
 		no "wrapper does not pin HOME"
 	fi
 
+	# Regression: install_self runs inside cmd_get on the bootstrap path. If it
+	# clobbers cmd_get's scratch variables (POSIX sh has no `local`), the very
+	# first fetch after install fails with the wrong timeout or URL.
+	# This must run in a genuinely empty prefix, so it unsets SB_HOME for the
+	# child rather than inheriting the suite's.
+	_fresh="$ROOT/fresh"
+	mkdir -p "$_fresh/home"
+	# reuse the suite's download cache so this does not pull 300 MB twice
+	mkdir -p "$_fresh/sb/cache"
+	cp -R "$SB_HOME/cache/dl" "$_fresh/sb/cache/" 2>/dev/null || true
+	if ( unset SB_HOME XDG_DATA_HOME; export HOME="$_fresh/home" SB_HOME="$_fresh/sb"
+	     env | grep SB_HOME > "$_fresh/env"
+	     sh "$SB_SRC" get https://example.com ) \
+		>"$_fresh/out" 2>"$_fresh/err"; then
+		if grep -qi 'example' "$_fresh/out"; then
+			ok "cold first fetch after a bootstrap install works (variable isolation)"
+		else
+			no "cold first fetch produced no page: $(head -c 120 "$_fresh/out")"
+		fi
+	else
+		no "cold first fetch failed: $(tail -3 "$_fresh/err" | tr '\n' ' ')"
+	fi
+	if [ -x "$_fresh/sb/bin/sb" ]; then
+		ok "bootstrap left sb at \$SB_HOME/bin/sb"
+	else
+		no "bootstrap did not leave sb behind"
+	fi
+	rm -rf "$_fresh"
+
 	# a tampered binary must be detected
 	_lt="$SB_HOME/engines/lightpanda/current/bin/lightpanda"
 	if [ -f "$_lt" ]; then
@@ -304,14 +337,26 @@ section "live: the wall the corpus is about"
 		no "solve (exit $RC): $(printf '%s' "$OUT$ERR" | head -c 150)"
 	fi
 
-	run $SB get https://www.scrapingcourse.com/cloudflare-challenge --timeout 60
-	if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -qi 'bypassed the cloudflare'; then
-		ok "get escalates past the challenge on its own"
-	elif [ "$RC" = 7 ]; then
-		miss "get stopped at the wall (solver missed; IP-dependent)"
-	else
-		no "get escalation (exit $RC): $(printf '%s' "$OUT" | head -c 150)"
-	fi
+	# After the solve above, a cached cf_clearance can make the very first
+	# attempt succeed, in which case nothing escalated and nothing should.
+	# Either "the content behind the gate came back" or "stopped at the wall"
+	# is a correct outcome; "some other page, quietly" is not.
+	run $SB get https://www.scrapingcourse.com/cloudflare-challenge --timeout 90
+	case "$RC" in
+		0)
+			if printf '%s' "$OUT" | grep -qi 'bypassed the cloudflare'; then
+				ok "get returns the content behind the challenge"
+			else
+				no "get returned something that is not the gated page: $(printf '%s' "$OUT" | head -c 120)"
+			fi
+			;;
+		7)
+			miss "get stopped at the wall (solver missed; IP-dependent)"
+			;;
+		*)
+			no "get escalation (exit $RC): $(printf '%s' "$OUT" | head -c 150)"
+			;;
+	esac
 
 section "live: a page that must not be mistaken for a wall"
 	run $SB get https://example.com --timeout 60

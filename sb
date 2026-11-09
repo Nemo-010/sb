@@ -507,31 +507,34 @@ ensure_engine() { # engine
 # An existing copy at the same version is left alone - otherwise running a
 # newer script by hand would quietly replace it with whatever is on main.
 install_self() {
-	if [ -x "$SB_BIN/sb" ] && [ "${1:-}" != "--force" ]; then
-		_have=$("$SB_BIN/sb" version 2>/dev/null | head -n 1 | sed 's/^sb //')
-		[ "$_have" = "$SB_VERSION" ] && return 0
-	fi
-	_self=$(self_source)
-	if [ -n "$_self" ] && [ -f "$_self" ] && [ -r "$_self" ]; then
-		mkdir -p "$SB_BIN" || return 1
-		cp "$_self" "$SB_BIN/.sb.new.$$" || return 1
-		chmod 755 "$SB_BIN/.sb.new.$$" || return 1
-		mv -f "$SB_BIN/.sb.new.$$" "$SB_BIN/sb" || return 1
-		return 0
-	fi
-	case "${SB_AUTO_INSTALL_SELF:-1}" in 0) return 0 ;; esac
-	have curl || have wget || return 0
-	mkdir -p "$SB_BIN" || return 1
-	_t="$SB_BIN/.sb.new.$$"
-	if have curl; then
-		curl -fsSL --connect-timeout 20 -o "$_t" "$SB_SELF_URL" 2>/dev/null || { rm -f "$_t"; return 0; }
-	else
-		wget -q -O "$_t" "$SB_SELF_URL" 2>/dev/null || { rm -f "$_t"; return 0; }
-	fi
-	head -n 1 "$_t" | grep -q '^#!/bin/sh' || { rm -f "$_t"; return 0; }
-	sh -n "$_t" 2>/dev/null || { rm -f "$_t"; return 0; }
-	chmod 755 "$_t" && mv -f "$_t" "$SB_BIN/sb"
-	return 0
+	# subshell: keeps this function's scratch variables out of the caller
+	(
+			if [ -x "$SB_BIN/sb" ] && [ "${1:-}" != "--force" ]; then
+				_have=$("$SB_BIN/sb" version 2>/dev/null | head -n 1 | sed 's/^sb //')
+				[ "$_have" = "$SB_VERSION" ] && return 0
+			fi
+			_self=$(self_source)
+			if [ -n "$_self" ] && [ -f "$_self" ] && [ -r "$_self" ]; then
+				mkdir -p "$SB_BIN" || return 1
+				cp "$_self" "$SB_BIN/.sb.new.$$" || return 1
+				chmod 755 "$SB_BIN/.sb.new.$$" || return 1
+				mv -f "$SB_BIN/.sb.new.$$" "$SB_BIN/sb" || return 1
+				return 0
+			fi
+			case "${SB_AUTO_INSTALL_SELF:-1}" in 0) return 0 ;; esac
+			have curl || have wget || return 0
+			mkdir -p "$SB_BIN" || return 1
+			_t="$SB_BIN/.sb.new.$$"
+			if have curl; then
+				curl -fsSL --connect-timeout 20 -o "$_t" "$SB_SELF_URL" 2>/dev/null || { rm -f "$_t"; return 0; }
+			else
+				wget -q -O "$_t" "$SB_SELF_URL" 2>/dev/null || { rm -f "$_t"; return 0; }
+			fi
+			head -n 1 "$_t" | grep -q '^#!/bin/sh' || { rm -f "$_t"; return 0; }
+			sh -n "$_t" 2>/dev/null || { rm -f "$_t"; return 0; }
+			chmod 755 "$_t" && mv -f "$_t" "$SB_BIN/sb"
+			return 0
+	)
 }
 
 # Only the bootstrap path installs; call it once per process at most.
