@@ -42,6 +42,27 @@ Every download is pinned to an exact release and verified against the
 upstream sha256 before it is extracted. Installs are staged and moved into
 place atomically, so a failed install leaves the previous version working.
 
+### The broker lane, opt-in
+
+The corpus this tool comes from measures with a free, keyless platform read
+host (`read.web.pkgforge.dev`), and that host reads pages no local binary can:
+a Cloudflare-walled vendor page comes back as 2,158 words of Markdown where
+every local engine receives a refusal. `sb` can use it as a lane, but it is
+off, because a page read through it leaves the machine:
+
+```sh
+sb get https://chatgpt.com/pricing --engine broker --as markdown
+SB_BROKER=1 sb get https://example.com        # broker as the last rung
+SB_BROKER=1 SB_BROKER_PROVIDER=firecrawl sb get URL
+```
+
+The lane's front matter is read rather than ignored: `upstream_status` is the
+origin's status, `final_url` is the page actually read, and an answer whose
+`final_url` names another host is a *substitution*, not the page that was
+asked for, so it is refused with exit `7` and reported. That is exactly the
+`nodeseek.com` failure the corpus documents: a `200`, 29 words, and a
+`final_url` on `warning.nodeseek.com`.
+
 ## Commands
 
 ```
@@ -90,8 +111,16 @@ wall** (the same markers the corpus used: `just a moment`, `cf-mitigated`,
 printing an error. If a browser comes back with a challenge page, `sb get`
 gives nokk's solver one pass before it gives up (`--no-solve` disables that).
 
-Exit codes: `0` ok · `6` no engine produced anything · `7` the wall is still up
-(the best attempt is printed anyway).
+An attempt is also passed over when the **origin itself** did not deliver the
+page, which used to be invisible: an edge error page carrying a `200`
+("Unable to load site", a VPN notice, an error 1020 body), a `403`/`429`/`52x`
+status, and an answer from a host other than the one asked for. The first two
+escalate like a wall; a 404 is reported as a 404 and is not escalated, because
+a browser would receive the same missing page.
+
+Exit codes: `0` ok · `6` no engine produced anything · `7` the page was refused
+(a bot wall, an edge refusal, or a substituted page) — the best attempt is
+printed anyway.
 
 ```sh
 $ sb get https://www.scrapingcourse.com/cloudflare-challenge
@@ -187,9 +216,10 @@ not re-downloaded (both cases are covered by the test suite). `sb doctor`,
 
 * `sb doctor --json` answers "what is installed, is it healthy" in one object
   with a `healthy` boolean; `--live` adds a real fetch per engine.
-* `sb get --json` returns `{ok, engine, url, format, bytes, wall, meta, text,
-  attempts[]}` — `attempts` records every engine it tried and why it moved on,
-  so a failure is diagnosable from the envelope alone.
+* `sb get --json` returns `{ok, engine, url, format, bytes, wall, status,
+  final_url, meta, text, attempts[]}` — `attempts` records every engine it tried,
+  why it moved on, and the status and final URL when the engine could report
+  them, so a failure is diagnosable from the envelope alone.
 * `sb get --json` never writes install chatter to stdout. Diagnostics go to
   stderr, results to stdout.
 * `sb help`, `sb man` and `sb help <command>` are always available offline.
@@ -206,6 +236,9 @@ not re-downloaded (both cases are covered by the test suite). `sb doctor`,
 | `SB_CHAIN` | override the escalation order, e.g. `"nokk obscura"` |
 | `SB_SOLVE` | `0` disables the automatic solver pass in `sb get` |
 | `SB_SOLVE_WAIT` | seconds the automatic solver waits (default 30) |
+| `SB_BROKER` | `1` adds the broker lane to the `text` and `markdown` chains |
+| `SB_BROKER_BASE` | the broker read host (default `https://read.web.pkgforge.dev`) |
+| `SB_BROKER_PROVIDER` | pin one reader on the broker lane |
 | `SB_SESSION` | named nokk session for the automatic solver pass |
 | `SB_CI_PROFILE` | curl-impersonate profile (default `chrome152`) |
 | `SB_SELF_URL` | where `sb update --self` fetches from |
@@ -217,9 +250,9 @@ yourself and `sb install` will verify and use them.
 ## Testing
 
 ```sh
-./test.sh             # 43 offline checks, no network
-./test.sh --live      # + real fetches through every engine (52)
-./test.sh --install   # + a clean install into a throwaway prefix (72)
+./test.sh             # 61 offline checks, no network
+./test.sh --live      # + real fetches through every engine (74)
+./test.sh --install   # + a clean install into a throwaway prefix (97)
 ```
 
 Each run gets its own `SB_HOME` under a temp dir and removes it on exit; the

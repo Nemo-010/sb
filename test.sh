@@ -168,38 +168,190 @@ if [ -s "$ROOT/.bad" ]; then no "manifest digests: $(cat "$ROOT/.bad")"; else ok
 
 # ---------------------------------------------------------------------------
 section "classification (offline, stub engine)"
-	# A deterministic probe of the wall/exit-code contract, with no network and
-	# no download: a stub engine that prints a wall body is installed under a
-	# throwaway prefix, so `sb get` sees exactly one outcome.
+	# A deterministic probe of the classification contract, with no network and
+	# no download: a stub engine that honours the wrapper's flags is installed
+	# under a throwaway prefix, so `sb get` sees exactly one outcome.
+	#
+	# The stub speaks the contract the real curl wrapper speaks: the body goes
+	# to the file named after -o, and `http_code<TAB>url_effective<TAB>redirects`
+	# goes to $SB_ATTEMPT_META. A stub that only printed a body would be a
+	# truncated download, not a page, and that is a different test.
 	_stub="$ROOT/stub"
 	mkdir -p "$_stub/home" "$_stub/sb/engines/curl-impersonate/1.0"
-	printf '#!/bin/sh\nprintf "Just a moment...\\nEnable JavaScript and cookies to continue\\n"\n' \
-		> "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
-	chmod 755 "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
-	ln -s 1.0 "$_stub/sb/engines/curl-impersonate/current"
 	printf 'ENGINE=curl-impersonate\nVERSION=1.0\nBIN=curl-impersonate\nBIN_SHA256=x\n' \
 		> "$_stub/sb/engines/curl-impersonate/1.0/.sb-install"
-	_sout=$(HOME="$_stub/home" SB_HOME="$_stub/sb" SB_SOLVE=0 sh "$SB_SRC" \
-		get https://example.invalid/ --engine curl-impersonate --no-solve 2>/dev/null)
-	_src=$?
-	if [ "$_src" = 7 ]; then
-		ok "a wall body with nothing behind it exits 7, not 6"
-	else
-		no "wall-only outcome exited $_src, wanted 7"
-	fi
-	if printf '%s' "$_sout" | grep -q 'Just a moment'; then
-		ok "the wall page is still printed on exit 7"
-	else
-		no "exit 7 printed no body ($_sout)"
-	fi
+	ln -s 1.0 "$_stub/sb/engines/curl-impersonate/current"
 
-	# a clean body must not be mistaken for a wall
-	printf '#!/bin/sh\nprintf "A real page with several lines of ordinary content, long enough to pass the minimum.\\n"\n' \
-		> "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
-	_cout=$(HOME="$_stub/home" SB_HOME="$_stub/sb" sh "$SB_SRC" \
-		get https://example.invalid/ --engine curl-impersonate 2>/dev/null)
-	_crc=$?
-	if [ "$_crc" = 0 ]; then ok "a clean body exits 0"; else no "clean body exited $_crc"; fi
+	stub_engine() { # body status [final-url]
+		_fin=${3:-}
+		cat > "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate" <<STUB
+#!/bin/sh
+_out=""; _prev=""; _url=""
+for _a in "\$@"; do
+	[ "\$_prev" = "-o" ] && _out=\$_a
+	case "\$_a" in
+		http://*|https://*) _url=\$_a ;;
+	esac
+	_prev=\$_a
+done
+if [ -n "\$_out" ]; then
+	cat > "\$_out" <<'BODY'
+$1
+BODY
+else
+	printf '%s\\n' '$1'
+fi
+if [ -n "\${SB_ATTEMPT_META:-}" ]; then
+	printf '%s\\t%s\\t0\\n' '$2' "${_fin:-\$_url}" > "\$SB_ATTEMPT_META"
+fi
+exit 0
+STUB
+		chmod 755 "$_stub/sb/engines/curl-impersonate/1.0/curl-impersonate"
+	}
+	stub_run() { # args... -> stdout, RC
+		_out=$(HOME="$_stub/home" SB_HOME="$_stub/sb" SB_SOLVE=0 sh "$SB_SRC" \
+			get https://example.invalid/ --engine curl-impersonate --no-solve "$@" 2>/dev/null)
+		RC=$?
+	}
+
+	# 1. a challenge page is a wall: exit 7, body still printed
+	stub_engine 'Just a moment...' 200
+	stub_run
+	if [ "$RC" = 7 ]; then ok "a wall body with nothing behind it exits 7, not 6"
+	else no "wall-only outcome exited $RC, wanted 7"; fi
+	if printf '%s' "$_out" | grep -q 'Just a moment'; then
+		ok "the wall page is still printed on exit 7"
+	else no "exit 7 printed no body ($_out)"; fi
+
+	# 2. a clean body must not be mistaken for a wall
+	stub_engine 'A real page with several lines of ordinary content, long enough to pass the minimum.' 200
+	stub_run
+	if [ "$RC" = 0 ]; then ok "a clean body exits 0"; else no "clean body exited $RC"; fi
+
+	# 3. an edge refusal with a 200 on it is not content. This is the measured
+	#    case: chatgpt.com/pricing answers 200 with "Unable to load site" and a
+	#    Ray ID, and a checker that trusted the status took it for a page.
+	stub_engine 'Unable to load site
+Please try again later. If you are using a VPN, try turning it off.
+[IP:203.0.113.9 | Ray ID:a57c6060e928a5ab]' 200
+	stub_run --json
+	if [ "$RC" = 7 ]; then ok "a 200 edge refusal exits 7, not 0"
+	else no "edge refusal exited $RC, wanted 7"; fi
+	if printf '%s' "$_out" | grep -q '"wall":true'; then ok "the edge refusal is flagged wall:true"
+	else no "edge refusal was not flagged as a wall"; fi
+
+	# 4. a 404 is reported as a 404, and is not escalated into a browser
+	stub_engine 'Not found, and here is the site navigation that goes with it.' 404
+	stub_run --json
+	if [ "$RC" = 0 ]; then ok "a 404 is answered, not escalated"
+	else no "a 404 exited $RC, wanted 0"; fi
+	if printf '%s' "$_out" | grep -q '"status":404'; then
+		ok "the origin's 404 reaches the envelope"
+	else no "the envelope has no status 404 ($_out)"; fi
+
+	# 5. an answer from another host is reported, not hidden
+	stub_engine 'The page you asked for moved to a notice page.' 200 https://notice.example.org/moved
+	stub_run --json
+	if printf '%s' "$_out" | grep -q '"final_url":"https://notice.example.org/moved"'; then
+		ok "the final URL reaches the envelope"
+	else no "no final_url in the envelope ($_out)"; fi
+	if printf '%s' "$_out" | grep -q 'https://example.invalid/'; then
+		ok "the envelope still names the URL that was asked for"
+	else no "the envelope lost the requested URL"; fi
+
+	# 6. --json must stay parseable with a body that contains quotes and tabs
+	stub_engine 'He said "no	thanks" and left.' 200
+	stub_run --json
+	if printf '%s' "$_out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+		ok "a body with quotes and tabs does not break the envelope"
+	else no "the envelope is not valid JSON for a quoting body"; fi
+	rm -rf "$_stub"
+
+section "the broker lane (offline, answered by a stub)"
+	# The broker lane is reached over the Electrosphere, so the offline check
+	# replaces the host with a command that prints a read answer. What is under
+	# test is the classification: upstream_status, final_url and the front
+	# matter are read, and a substitution is refused.
+	_bstub="$ROOT/brokerstub.sh"
+	mkdir -p "$_stub/home" "$_stub/sb"
+	broker_stub() { # body-with-front-matter
+		cat > "$_bstub" <<STUB
+#!/bin/sh
+cat <<'EOF'
+$1
+EOF
+STUB
+		chmod 755 "$_bstub"
+	}
+	broker_run() { # args... -> stdout, RC
+		_out=$(HOME="$_stub/home" SB_HOME="$_stub/sb" SB_BROKER_CMD="$_bstub" \
+			SB_SOLVE=0 sh "$SB_SRC" get https://example.invalid/post --engine broker "$@" 2>/dev/null)
+		RC=$?
+	}
+
+	broker_stub '---
+title: "A page"
+words: 120
+upstream_status: 200
+confidence: high
+final_url: "https://example.invalid/post"
+---
+The body of a page that the reader read properly, long enough to pass the minimum.'
+	broker_run --json
+	if [ "$RC" = 0 ]; then ok "a broker read is accepted"
+	else no "a broker read exited $RC, wanted 0"; fi
+	if printf '%s' "$_out" | grep -q '"status":200'; then
+		ok "upstream_status reaches the envelope"
+	else no "upstream_status is missing from the envelope ($_out)"; fi
+	if printf '%s' "$_out" | grep -q 'The body of a page'; then
+		ok "the front matter is stripped from the body"
+	else no "the front matter leaked into the body"; fi
+
+	broker_stub '---
+title: "Blocked"
+words: 30
+upstream_status: 403
+confidence: low
+final_url: "https://example.invalid/post"
+---
+Access denied, and here is the wall page.'
+	broker_run
+	if [ "$RC" = 7 ]; then ok "an upstream 403 is a refusal, not content"
+	else no "an upstream 403 exited $RC, wanted 7"; fi
+
+	broker_stub '---
+title: "IPv6 is off"
+words: 30
+upstream_status: 403
+confidence: low
+final_url: "https://warning.example.org/ipv6-is-disabled"
+---
+The forum has closed IPv6 access, please refresh your DNS cache.'
+	broker_run --json
+	if [ "$RC" = 7 ]; then ok "a substitution (another host) exits 7"
+	else no "a substitution exited $RC, wanted 7"; fi
+	if printf '%s' "$_out" | grep -q '"final_url":"https://warning.example.org/ipv6-is-disabled"'; then
+		ok "the substituted final_url is reported"
+	else no "the substitution was not reported ($_out)"; fi
+
+	# the lane's URL form: a target with its own query string goes to ?url=
+	cat > "$_bstub" <<'STUB'
+#!/bin/sh
+printf 'requested %s
+' "$1"
+STUB
+	chmod 755 "$_bstub"
+	_out=$(HOME="$_stub/home" SB_HOME="$_stub/sb" SB_BROKER_CMD="$_bstub" \
+		sh "$SB_SRC" get 'https://example.invalid/a?b=c' --engine broker 2>/dev/null)
+	if printf '%s' "$_out" | grep -q '?url=https%3A%2F%2Fexample.invalid%2Fa%3Fb%3Dc'; then
+		ok "a target with a query string is passed as ?url= (encoded)"
+	else no "the ?url= form was not used ($_out)"; fi
+
+	# the lane answers markdown; asking for a png is a usage error, not a fetch
+	HOME="$_stub/home" SB_HOME="$_stub/sb" sh "$SB_SRC" get https://example.invalid/ \
+		--engine broker --as png --out "$ROOT/x.png" >/dev/null 2>&1
+	if [ $? = 2 ]; then ok "the broker lane refuses --as png with exit 2"
+	else no "the broker lane answered --as png"; fi
 	rm -rf "$_stub"
 
 section "failure modes that must not look like success"
@@ -442,6 +594,45 @@ section "live: a page that must not be mistaken for a wall"
 		ok "clean page is not reported as a wall"
 	else
 		no "clean page classification (exit $RC)"
+	fi
+
+	# The measured case from the corpus: chatgpt.com/pricing answers a 200 that
+	# is not the page ("Unable to load site"). A refusal here is the pass.
+	run $SB get https://chatgpt.com/pricing --timeout 90
+	case "$RC" in
+		7) ok "a 200 edge refusal is reported as refused, not as content" ;;
+		0)
+			if [ "$(printf '%s' "$OUT" | wc -c)" -gt 4000 ]; then
+				miss "the edge served the real page this time (IP-dependent)"
+			else
+				no "a 200 refusal was returned as content"
+			fi
+			;;
+		*) miss "chatgpt.com/pricing answered exit $RC (IP-dependent)" ;;
+	esac
+
+section "live: the broker lane"
+	run $SB get https://example.com --engine broker --as markdown --json
+	if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q '"engine":"broker"'; then
+		ok "the broker lane reads a page"
+	else
+		miss "the broker lane is unreachable from here (exit $RC)"
+	fi
+	if [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -q '"status":200'; then
+		ok "the broker lane reports upstream_status"
+	else
+		miss "no upstream_status from the broker lane"
+	fi
+	# The corpus's own substitution case: a 200 that is a notice page on
+	# another host. Either the host answers the post or it is refused; what
+	# must never happen is the notice page being returned as the post.
+	run $SB get https://www.nodeseek.com/post-918318-1 --engine broker
+	if [ "$RC" = 7 ]; then
+		ok "a substituted answer on the broker lane exits 7"
+	elif [ "$RC" = 0 ] && printf '%s' "$OUT" | grep -qvi 'ipv6'; then
+		miss "nodeseek answered the post itself (IP-dependent)"
+	else
+		miss "nodeseek answered exit $RC (IP-dependent)"
 	fi
 fi
 

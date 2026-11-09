@@ -12,7 +12,7 @@
 #
 set -u
 
-SB_VERSION="0.1.0"
+SB_VERSION="0.2.0"
 SB_SELF_URL="${SB_SELF_URL:-https://raw.githubusercontent.com/Nemo-010/sb/main/sb}"
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,14 @@ SB_TMP="$SB_HOME/tmp"
 SB_CORE="nokk obscura lightpanda curl-impersonate"
 SB_EXTRA="moli"
 SB_ALL="$SB_CORE $SB_EXTRA"
+
+# The broker lane. It is not an engine that installs: it is the platform read
+# host (the s-browse corpus documents it as rung 1 of the escalation ladder),
+# and it returns Markdown with the provenance a research answer needs. It is
+# opt-in, because a page read through it leaves the machine.
+SB_BROKER_ENGINE="broker"
+SB_EVERY="$SB_ALL $SB_BROKER_ENGINE"
+SB_BROKER_BASE="${SB_BROKER_BASE:-https://read.web.pkgforge.dev}"
 
 # ---------------------------------------------------------------------------
 # what is pinned, and why
@@ -79,6 +87,7 @@ obscura|h4ckf0r0day/obscura|obscura|the full engine: render, screenshot, CDP, MC
 lightpanda|lightpanda-io/browser|lightpanda|smallest RSS, fastest bulk text, honest UA (no stealth)
 moli|lexmount/moli|moli|best one-shot form automation, consistent UA, layout is opt-in
 curl-impersonate|lexiforest/curl-impersonate|curl-impersonate|no JS; a real Chrome ClientHello, 12 MiB, 0.6 s
+broker|web.pkgforge.dev|broker|remote read host: markdown with provenance, no install, no key (opt-in)
 "
 
 # engine|js|render|screenshot|pdf|eval|solve|markdown|cdp
@@ -88,11 +97,18 @@ obscura|yes|yes|yes|no|yes|no|yes|yes
 lightpanda|yes|stub|stub|stub|no|no|yes|yes
 moli|yes|yes|yes|yes|yes|no|yes|yes
 curl-impersonate|no|no|no|no|no|no|no|no
+broker|no|no|no|no|no|no|yes|no
 "
 
 # wall markers, adopted from the s-browse corpus classifier. Tuned to
 # under-report a wall rather than over-report one.
 SB_WALL_RE='just a moment|checking your browser|performing security verification|verifying you are (a )?human|enable javascript and cookies|cf-mitigated|cf-chl|challenge-platform|verify you are (a )?human|are you a robot|unusual traffic|access denied|attention required|incapsula|pardon our interruption|ddos protection|press (&|and) hold|please complete the security check|请稍候|验证码|人机验证|安全验证|滑动验证|拒绝访问|访问受限|异常访问|请完成验证'
+
+# A refusal that arrives with a 200 and no challenge in it: the edge's own
+# error page ("Unable to load site", a VPN notice, an error 1020 body). These
+# are read from the *head* of a *short* body only, so that a documentation page
+# about one of these strings is not mistaken for the string's page.
+SB_ERRPAGE_RE='unable to load site|if you are using a vpn|try turning it off|checking if the site connection is secure|request could not be satisfied|this site can.t be reached|you have been blocked|access to this page has been denied|cf-error-details|please enable cookies and reload the page|this domain (is|may be) for sale|account has been suspended|service temporarily unavailable'
 
 # ---------------------------------------------------------------------------
 # tiny utilities
@@ -151,6 +167,15 @@ json_file() { printf '"'; json_escape < "$1"; printf '"'; }
 
 bytes_of() {
 	if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi
+}
+
+# host of a URL, lowercased and without a leading www: the comparison the
+# escalation order is allowed to make ("did the origin serve the page I asked
+# for, or a notice page on another host?")
+host_of() {
+	printf '%s\n' "${1:-}" | tr 'A-Z' 'a-z' |
+		sed -e 's|^[a-z][a-z0-9+.-]*://||' -e 's|^[^/@]*@||' \
+			-e 's|/.*$||' -e 's|:.*$||' -e 's|^www\.||'
 }
 
 # Run "$@" with a wall-clock cap. Uses coreutils timeout when present and
@@ -500,6 +525,11 @@ ensure_engine() { # engine
 	# subshell: POSIX sh has no locals, so a callee would otherwise
 	# overwrite the caller's scratch variables (this bit `sb get` once).
 	(
+			# the broker lane is a host, not a download: it is present when curl is
+			if [ "$1" = "$SB_BROKER_ENGINE" ]; then
+				have curl && return 0
+				return 1
+			fi
 			_b=$(engine_bin "$1")
 			if [ -n "$_b" ] && [ -x "$_b" ]; then return 0; fi
 			case "${SB_AUTO_INSTALL:-1}" in
@@ -578,9 +608,47 @@ ad_fetch() { # engine format url outfile timeout
 	# subshell: keeps this function's scratch variables out of the caller
 	(
 			_e=$1; _f=$2; _u=$3; _o=$4; _t=$5
+			_px=${SB_PROXY_OPT:-}
+
+			# the broker lane has no binary: it is a host, reached with curl.
+			# Its answer is Markdown with YAML front matter, and the front matter
+			# is half the answer: upstream_status is the origin's status, final_url
+			# is the page actually read, confidence is the reader's verdict on it.
+			# All of it goes to $SB_ATTEMPT_META; only the body goes to stdout.
+			if [ "$_e" = "$SB_BROKER_ENGINE" ]; then
+				_br_url=$(broker_url "$_u")
+				_br=$(mktemp "$SB_TMP/br.XXXXXX") || return 1
+				if [ -n "${SB_BROKER_CMD:-}" ]; then
+					sh -c "$SB_BROKER_CMD \"\$1\"" _ "$_br_url" > "$_br" 2>/dev/null
+				else
+					curl -qsS --max-time "$_t" -o "$_br" "$_br_url" 2>/dev/null
+				fi
+				_br_rc=$?
+				if [ "$_br_rc" != 0 ] || [ ! -s "$_br" ]; then
+					rm -f "$_br"
+					return 1
+				fi
+				_br_up=$(sed -n 's/^upstream_status:[[:space:]]*//p' "$_br" | head -n 1)
+				_br_fin=$(sed -n 's/^final_url:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$_br" | head -n 1)
+				_br_conf=$(sed -n 's/^confidence:[[:space:]]*//p' "$_br" | head -n 1)
+				_br_words=$(sed -n 's/^words:[[:space:]]*//p' "$_br" | head -n 1)
+				if ! head -n 1 "$_br" | grep -q '^---'; then
+					# not a read answer: the host's own JSON refusal
+					_br_up=$(sed -n 's/.*"status":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_br" | head -n 1)
+				fi
+				[ -n "${SB_ATTEMPT_META:-}" ] &&
+					printf '%s\t%s\t%s\t%s\n' "$_br_up" "$_br_fin" "$_br_conf" "$_br_words" > "$SB_ATTEMPT_META"
+				if head -n 1 "$_br" | grep -q '^---'; then
+					awk '/^---[ \t]*$/ && fm < 2 { fm++; next } fm >= 2 { print }' "$_br"
+				else
+					cat "$_br"
+				fi
+				rm -f "$_br"
+				return 0
+			fi
+
 			_b=$(engine_bin "$_e") || return 1
 			[ -n "$_b" ] || return 1
-			_px=${SB_PROXY_OPT:-}
 
 			case "$_e:$_f" in
 				obscura:text)
@@ -636,16 +704,24 @@ ad_fetch() { # engine format url outfile timeout
 					engine_exec "$_e" "$_t" "$_b" fetch --layout --dump pdf "$_u" ${_px:+--http-proxy "$_px"} > "$_o" 2>/dev/null
 					[ -s "$_o" ] ;;
 
-				curl-impersonate:text)
+				curl-impersonate:text|curl-impersonate:html|curl-impersonate:links)
+					# The body goes to a scratch file so that curl's --write-out can report
+					# the origin's status and the URL it actually landed on. That pair is
+					# the only evidence an HTTP-only engine can give about a page it did
+					# not deliver, and `sb get` reads it from $SB_ATTEMPT_META.
+					_ci_body=$(mktemp "$SB_TMP/ci.XXXXXX") || return 1
 					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
-						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null | strip_html ;;
-				curl-impersonate:html)
-					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
-						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null ;;
-				curl-impersonate:links)
-					engine_exec "$_e" "$_t" "$_b" --impersonate "${SB_CI_PROFILE:-chrome152}" \
-						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} "$_u" 2>/dev/null |
-						sed -n 's/.*href="\([^"]*\)".*/\1/p' | sort -u ;;
+						-sSL --compressed -m "$_t" ${_px:+--proxy "$_px"} \
+						-o "$_ci_body" -w '%{http_code}\t%{url_effective}\t%{num_redirects}' \
+						"$_u" > "${SB_ATTEMPT_META:-/dev/null}" 2>/dev/null
+					_ci_rc=$?
+					case "$_f" in
+						text) strip_html < "$_ci_body" ;;
+						html) cat "$_ci_body" ;;
+						links) sed -n 's/.*href="\([^"]*\)".*/\1/p' "$_ci_body" | sort -u ;;
+					esac
+					rm -f "$_ci_body"
+					return $_ci_rc ;;
 				curl-impersonate:markdown|curl-impersonate:png|curl-impersonate:pdf)
 					return 1 ;;
 
@@ -761,6 +837,14 @@ is_wall() { # file
 	return 1
 }
 
+# An edge refusal with a 200 on it, which is not a challenge page: the marker
+# has to be near the start of a body too short to be the page itself.
+is_errorpage() { # file [max-bytes]
+	[ -f "$1" ] || return 1
+	[ "$(bytes_of "$1")" -le "${2:-2000}" ] || return 1
+	head -c 600 "$1" 2>/dev/null | grep -qiE "$SB_ERRPAGE_RE"
+}
+
 # Several engines exit 0 even when navigation failed (moli, lightpanda, nokk
 # and obscura all print their error and return success). Trusting $? alone
 # would hand an agent an error page as if it were content, so failure is
@@ -771,12 +855,65 @@ failed_out() { # engine stdout-file stderr-file
 		'"ok"[[:space:]]*:[[:space:]]*false|[{,]"?error"?[[:space:]]*:|failed to navigate|navigation failed|failed to fetch|page failed|couldntconnect|could not resolve|no such host|connection refused|dns error|tls error|proxyconnect|unknown impersonation|blocked bad port'
 }
 
-# the verdict for one attempt: ok | wall | thin | error
+# percent-encode a URL for the broker's ?url= form. A target that carries its
+# own query string or fragment must not be spliced into the path, or the
+# reader treats the origin's parameters as its own controls.
+uri_encode() {
+	printf '%s' "${1:-}" | awk '
+		BEGIN {
+			for (n = 1; n < 256; n++) {
+				c = sprintf("%c", n)
+				if (c == "") continue
+				if (n < 32 || n > 126 || c !~ /[A-Za-z0-9._~-]/) esc[c] = sprintf("%%%02X", n)
+			}
+		}
+		{ out = ""; for (i = 1; i <= length($0); i++) { c = substr($0, i, 1); out = out (c in esc ? esc[c] : c) } print out }'
+}
+
+broker_url() { # target -> the read-host URL, with the provider pin when set
+	_bu_base=${SB_BROKER_BASE%/}
+	case "${1:-}" in
+		*'?'*|*'#'*)
+			_bu="${_bu_base}/?url=$(uri_encode "$1")"
+			[ -n "${SB_BROKER_PROVIDER:-}" ] && _bu="$_bu&__provider=${SB_BROKER_PROVIDER}"
+			;;
+		*)
+			_bu="$_bu_base/$1"
+			[ -n "${SB_BROKER_PROVIDER:-}" ] && _bu="$_bu?__provider=${SB_BROKER_PROVIDER}"
+			;;
+	esac
+	printf '%s\n' "$_bu"
+}
+
+# the verdict for one attempt: ok | wall | errorpage | thin | error
+#
+# The order matters. A navigation error is an error even if the engine printed
+# a page first; a challenge is a wall; an edge refusal ("Unable to load site",
+# "you have been blocked") is a refusal however few bytes it carries; only then
+# is a short body merely thin.
 verdict() { # engine outfile errfile min_chars
 	if failed_out "$1" "$2" "$3"; then echo error; return; fi
 	if is_wall "$2"; then echo wall; return; fi
+	if is_errorpage "$2"; then echo errorpage; return; fi
 	if [ "$(bytes_of "$2")" -lt "${4:-0}" ]; then echo thin; return; fi
 	echo ok
+}
+
+# Provenance note: what the origin said about the page that came back, when an
+# engine could report it. A 403 or a 5xx is the edge refusing, and a final URL
+# on another host is the page not being the one asked for. Neither changes the
+# exit code - a redirect to the vendor's new domain is a real answer - but both
+# belong on stderr so a caller can decide.
+provenance_note() { # status final-url engine url
+	_pn_status=${1:-}
+	_pn_final=${2:-}
+	[ -n "$_pn_status" ] || [ -n "$_pn_final" ] || return 0
+	case "$_pn_status" in
+		4*|5*) say "${3:-engine}: the origin answered $_pn_status" ;;
+	esac
+	if [ -n "$_pn_final" ] && [ "$(host_of "$_pn_final")" != "$(host_of "${4:-}")" ]; then
+		say "${3:-engine}: asked for $(host_of "${4:-}"), the answer came from $(host_of "$_pn_final")"
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -796,24 +933,31 @@ chain_for() { # format explicit-engine
 	esac
 	case "$_f" in
 		text)
-			printf '%s\n' "curl-impersonate nokk obscura lightpanda moli" ;;
+			_c="curl-impersonate nokk obscura lightpanda moli" ;;
 		markdown)
 			# only obscura, lightpanda and moli emit real markdown; nokk has
 			# no markdown dumper, so it is not offered for this format
-			printf '%s\n' "obscura lightpanda moli" ;;
+			_c="obscura lightpanda moli" ;;
 		html)
 			# the raw-HTTP engine first: it is 100x cheaper and returns the
 			# document the server sent, which is what --as html should mean
-			printf '%s\n' "curl-impersonate obscura lightpanda moli" ;;
+			_c="curl-impersonate obscura lightpanda moli" ;;
 		links)
-			printf '%s\n' "obscura curl-impersonate nokk" ;;
+			_c="obscura curl-impersonate nokk" ;;
 		png)
-			printf '%s\n' "obscura moli lightpanda" ;;
+			_c="obscura moli lightpanda" ;;
 		pdf)
-			printf '%s\n' "moli lightpanda" ;;
+			_c="moli lightpanda" ;;
 		*)
-			printf '%s\n' "$SB_CORE" ;;
+			_c="$SB_CORE" ;;
 	esac
+	# The broker is the last rung, and only when it is asked for: it is a
+	# remote read host, so a page read through it leaves the machine. It speaks
+	# markdown, which covers --as text as well.
+	case "${SB_BROKER:-0}" in
+		1) case "$_f" in text|markdown) _c="$_c $SB_BROKER_ENGINE" ;; esac ;;
+	esac
+	printf '%s\n' "$_c"
 }
 
 # ---------------------------------------------------------------------------
@@ -826,6 +970,9 @@ cmd_install() {
 		case "$_a" in
 			--latest|--no-verify|--force) _opts="$_opts $_a" ;;
 			all) _want="$_want $SB_ALL" ;;
+			"$SB_BROKER_ENGINE")
+				say "$SB_BROKER_ENGINE: remote lane at $SB_BROKER_BASE, nothing to install"
+				_want="$_want $SB_BROKER_ENGINE" ;;
 			*)
 				case " $SB_ALL " in
 					*" $_a "*) _want="$_want $_a" ;;
@@ -837,6 +984,7 @@ cmd_install() {
 	ensure_dirs
 	_fail=0
 	for _e in $_want; do
+		[ "$_e" = "$SB_BROKER_ENGINE" ] && continue
 		# shellcheck disable=SC2086
 		install_engine "$_e" $_opts || _fail=1
 	done
@@ -882,6 +1030,7 @@ cmd_uninstall() {
 	if [ "$_all" = 1 ]; then _want="$SB_ALL"; fi
 	[ -z "$_want" ] && die "sb uninstall: name an engine or --all" 2
 	for _e in $_want; do
+		[ "$_e" = "$SB_BROKER_ENGINE" ] && die "sb uninstall: $SB_BROKER_ENGINE is a remote lane, not an install" 2
 		case " $SB_ALL " in
 			*" $_e "*) ;;
 			*) die "sb uninstall: unknown engine '$_e'" 2 ;;
@@ -909,15 +1058,17 @@ cmd_list() {
 			printf '%-18s -         pinned %s (%s/%s)\n' "$_e" "${_p:--}" "$_os" "$_arch"
 		fi
 	done
+	printf '%-18s %-9s %s\n' "$SB_BROKER_ENGINE" remote \
+		"$SB_BROKER_BASE (opt-in: SB_BROKER=1)"
 }
 
 cmd_engines() {
 	printf '%-18s %-12s %-4s %-6s %-4s %-4s %-4s %-5s %-8s %s\n' \
 		engine pinned js render shot pdf eval solve markdown cdp
-	for _e in $SB_ALL; do
+	for _e in $SB_EVERY; do
 		_c=$(mf_caps "$_e")
 		printf '%-18s %-12s %-4s %-6s %-4s %-4s %-4s %-5s %-8s %s\n' \
-			"$_e" "$(engine_pinned_version "$_e")" \
+			"$_e" "$(_p=$(engine_pinned_version "$_e"); echo "${_p:-remote}")" \
 			"$(printf '%s' "$_c" | cut -d'|' -f1)" \
 			"$(printf '%s' "$_c" | cut -d'|' -f2)" \
 			"$(printf '%s' "$_c" | cut -d'|' -f3)" \
@@ -928,13 +1079,15 @@ cmd_engines() {
 			"$(printf '%s' "$_c" | cut -d'|' -f8)"
 	done
 	printf '\n%-18s %s\n' "" "what each one is for:"
-	for _e in $SB_ALL; do
+	for _e in $SB_EVERY; do
 		printf '  %-18s %s\n' "$_e" "$(engine_desc "$_e")"
 	done
 	printf '\nlightpanda "stub" = it emits a file but paints no CSS (canvas hash 0).\n'
 	printf 'solve           = ships a Cloudflare/challenge solver; only nokk.\n'
 	printf 'cdp             = can serve CDP (needs bind(2), denied in some cages;\n'
 	printf '                  lightpanda can serve over a unix socket instead).\n'
+	printf 'remote          = not installed: reached over the Electrosphere.\n'
+	printf '                  SB_BROKER=1 adds the broker lane to --as text/markdown.\n'
 }
 
 cmd_get() {
@@ -970,13 +1123,23 @@ cmd_get() {
 		*) die "sb get: unknown --as '$_fmt' (text, markdown, html, links, png, pdf)" 2 ;;
 	esac
 	if [ -n "$_engine" ] && [ "$_engine" != auto ]; then
-		case " $SB_ALL " in
+		case " $SB_EVERY " in
 			*" $_engine "*) ;;
-			*) die "sb get: unknown engine '$_engine' (known: $SB_ALL)" 2 ;;
+			*) die "sb get: unknown engine '$_engine' (known: $SB_EVERY)" 2 ;;
 		esac
+		if [ "$_engine" = "$SB_BROKER_ENGINE" ]; then
+			case "$_fmt" in
+				text|markdown) ;;
+				*) die "sb get: the broker lane answers markdown, not --as $_fmt" 2 ;;
+			esac
+		fi
 	fi
 	ensure_dirs
-	bootstrap || true
+	# a broker-only fetch must not pull four engines it will not use
+	case "$_engine" in
+		"$SB_BROKER_ENGINE") ;;
+		*) bootstrap || true ;;
+	esac
 
 	_chain=$(chain_for "$_fmt" "$_engine")
 	_attempts=""
@@ -984,6 +1147,11 @@ cmd_get() {
 	_besteng=""
 	_last=""          # last non-error attempt, used only if nothing is ok
 	_lasteng=""
+	_lastv=""
+	_laststatus=""
+	_lastfinal=""
+	_beststatus=""
+	_bestfinal=""
 	_idx=0
 	_tried_solve=0
 	[ "$_solve" = 0 ] && _tried_solve=2
@@ -993,7 +1161,8 @@ cmd_get() {
 		case "$_fmt" in
 			png) [ "$(cap "$_e" screenshot)" = no ] && continue ;;
 			pdf) [ "$(cap "$_e" pdf)" = no ] && continue ;;
-			links) case "$_e" in moli|lightpanda) continue ;; esac ;;
+			links) case "$_e" in moli|lightpanda|"$SB_BROKER_ENGINE") continue ;; esac ;;
+			html) case "$_e" in "$SB_BROKER_ENGINE") continue ;; esac ;;
 		esac
 		_idx=$((_idx + 1))
 		if ! ensure_engine "$_e"; then
@@ -1002,6 +1171,12 @@ cmd_get() {
 		fi
 		_pf="$SB_RUNDIR/out.$_idx"
 		_ef="$SB_RUNDIR/err.$_idx"
+		_mf="$SB_RUNDIR/meta.$_idx"
+		# exported so that an engine's own wrapper can write it; an engine that
+		# knows its status is a better witness than a second request
+		SB_ATTEMPT_META=$_mf
+		export SB_ATTEMPT_META
+		: > "$_mf" 2>/dev/null
 		_t0=$(date +%s 2>/dev/null || echo 0)
 		case "$_fmt" in
 			png|pdf)
@@ -1024,20 +1199,57 @@ cmd_get() {
 				_v=$(verdict "$_e" "$_pf" "$_ef" "$_min")
 			fi
 		fi
-		_attempts="$_attempts{\"engine\":\"$_e\",\"ok\":$([ "$_v" = ok ] && echo true || echo false),\"reason\":\"$_v\",\"exit\":$_rc,\"seconds\":$_dt},"
+
+		# A 200 on a notice page of another host is the wall's second face: the
+		# origin, or its edge, answered with something that is not the page that
+		# was asked for, and nothing in the body has to say so. The provenance an
+		# engine can report (status, final URL) therefore decides the escalation.
+		_mstatus=""
+		_mfinal=""
+		if [ -s "$_mf" ]; then
+			_mstatus=$(sed -n '1s/\t.*//p' "$_mf" 2>/dev/null | tr -dc '0-9')
+			_mfinal=$(sed -n '1s/^[0-9]*\t//; s/\t.*//p' "$_mf" 2>/dev/null)
+		fi
+		# The broker's own rule, applied here: an answer whose final_url names
+		# another host is a substitution, not the page that was asked for, so it
+		# is not content however complete it looks.
+		if [ "$_e" = "$SB_BROKER_ENGINE" ] && [ -n "$_mfinal" ] &&
+		   [ "$(host_of "$_mfinal")" != "$(host_of "$_url")" ]; then
+			_v=moved
+		fi
+		if [ "$_v" = ok ] || [ "$_v" = thin ]; then
+			# 403, 429 and the 52x/53x family are the edge saying no, whatever
+			# the body says; 404 and 410 are the origin answering the question.
+			# Escalating on a plain 404 would spend a browser to receive the
+			# same missing page, so the status is reported, not escalated.
+			case "$_mstatus" in
+				403|429|520|521|522|523|524|526|530) _v=http-error ;;
+			esac
+		fi
+
+		_meta_j=""
+		[ -n "$_mstatus" ] && _meta_j="$_meta_j,\"status\":$_mstatus"
+		[ -n "$_mfinal" ] && _meta_j="$_meta_j,\"final_url\":\"$(printf '%s' "$_mfinal" | json_escape)\""
+		_attempts="$_attempts{\"engine\":\"$_e\",\"ok\":$([ "$_v" = ok ] && echo true || echo false),\"reason\":\"$_v\",\"exit\":$_rc,\"seconds\":$_dt$_meta_j},"
 
 		if [ "$_v" = ok ]; then
 			_besteng=$_e
 			_best=$_pf
+			_beststatus=$_mstatus
+			_bestfinal=$_mfinal
 			break
 		fi
 		if [ "$_v" != error ] && [ -s "$_pf" ]; then
 			_last=$_pf
 			_lasteng=$_e
+			_lastv=$_v
+			_laststatus=$_mstatus
+			_lastfinal=$_mfinal
 		fi
 
 		# One solver pass when a browser produced a challenge page.
-		if [ "$_tried_solve" = 0 ] && { [ "$_v" = wall ] || [ "$_v" = thin ]; } &&
+		if [ "$_tried_solve" = 0 ] && [ "$_e" != "$SB_BROKER_ENGINE" ] &&
+		   { [ "$_v" = wall ] || [ "$_v" = thin ]; } &&
 		   [ -n "$(engine_bin nokk)" ]; then
 			_tried_solve=1
 			say "nokk: solving the challenge"
@@ -1055,7 +1267,7 @@ cmd_get() {
 						_best=$_pf2
 						break
 					fi
-					[ -s "$_pf2" ] && { _last=$_pf2; _lasteng=$_e; }
+					[ -s "$_pf2" ] && { _last=$_pf2; _lasteng=$_e; _lastv=$_v2; _laststatus=""; _lastfinal=""; }
 				fi
 			else
 				say "nokk: solver did not clear the challenge"
@@ -1066,13 +1278,17 @@ cmd_get() {
 		say "$_e: $_v, escalating"
 	done
 
-	# Nothing met the bar. If what came back is a bot wall, the honest answer is
-	# "the wall is still up" (exit 7) with that page printed - not "nothing
-	# came back" (exit 6), which would tell a caller there is no output to look
-	# at when there is.
-	if [ -z "$_best" ] && [ -n "$_last" ] && is_wall "$_last"; then
+	# Nothing met the bar. If what came back is a bot wall or an edge refusal,
+	# the honest answer is "the page was refused" (exit 7) with that attempt
+	# printed - not "nothing came back" (exit 6), which would tell a caller
+	# there is no output to look at when there is.
+	if [ -z "$_best" ] && [ -n "$_last" ] &&
+	   { is_wall "$_last" || [ "$_lastv" = errorpage ] || [ "$_lastv" = http-error ] ||
+	     [ "$_lastv" = moved ]; }; then
 		_best=$_last
 		_besteng=$_lasteng
+		_beststatus=$_laststatus
+		_bestfinal=$_lastfinal
 	elif [ -z "$_best" ]; then
 		_json_out "$_url" "$_attempts" "$_last" "$_lasteng" "$_fmt"
 		die "sb get: every engine failed for $_url" 6
@@ -1080,6 +1296,8 @@ cmd_get() {
 
 	_wall=false
 	is_wall "$_best" && _wall=true
+	[ "$_lastv" = errorpage ] && is_errorpage "$_best" && _wall=true
+	[ "$_lastv" = moved ] && _wall=true
 
 	case "$_fmt" in
 		png|pdf)
@@ -1105,21 +1323,35 @@ cmd_get() {
 
 	if [ "$_json" = 1 ]; then
 		_meta=$(ad_meta "$_besteng" "$_url" "$_t")
+		# Engines other than curl-impersonate report provenance in a metadata
+		# probe rather than on the fetch itself; fold it in instead of null.
+		if [ -z "$_beststatus" ]; then
+			_beststatus=$(printf '%s' "$_meta" | sed -n 's/.*"status":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+		fi
+		if [ -z "$_bestfinal" ]; then
+			_bestfinal=$(printf '%s' "$_meta" | sed -n 's/.*"final_url":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+		fi
+		provenance_note "$_beststatus" "$_bestfinal" "$_besteng" "$_url"
 		if [ "$(bytes_of "$_best")" -le "$_max" ]; then
 			_txtj=$(json_file "$_best")
 		else
 			_txtj="null"
 		fi
-		printf '{"ok":true,"engine":"%s","url":"%s","format":"%s","bytes":%s,"wall":%s,"meta":%s,"text":%s,"attempts":[%s]}\n' \
+		_statusj="null"
+		[ -n "$_beststatus" ] && _statusj=$_beststatus
+		_finalj="null"
+		[ -n "$_bestfinal" ] && _finalj="\"$(printf '%s' "$_bestfinal" | json_escape)\""
+		printf '{"ok":true,"engine":"%s","url":"%s","format":"%s","bytes":%s,"wall":%s,"status":%s,"final_url":%s,"meta":%s,"text":%s,"attempts":[%s]}\n' \
 			"$_besteng" "$(printf '%s' "$_url" | json_escape)" "$_fmt" \
-			"$(bytes_of "$_best")" "$_wall" "$_meta" "$_txtj" \
+			"$(bytes_of "$_best")" "$_wall" "$_statusj" "$_finalj" "$_meta" "$_txtj" \
 			"$(printf '%s' "$_attempts" | sed 's/,$//')"
 	else
+		provenance_note "$_beststatus" "$_bestfinal" "$_besteng" "$_url"
 		cat "$_best"
 		[ -n "$_out" ] && say "$_fmt written to $_out ($(bytes_of "$_best") bytes, $_besteng)"
 	fi
 	if [ "$_wall" = true ]; then
-		say "sb: note: the page still looks like a bot wall ($_besteng). Try: sb solve $_url"
+		say "sb: note: the page was refused ($_besteng). Try: sb solve $_url"
 		return 7
 	fi
 	return 0
@@ -1470,7 +1702,9 @@ cmd_doctor() {
 				"$_e" "$(engine_pinned_version "$_e")" "$(installed_version "$_e")" \
 				"$(printf '%s' "$_b" | json_escape)" "$(engine_desc "$_e" | json_escape)"
 		done
-		printf '}'
+		printf '},"broker":{"base":"%s","enabled":%s}' \
+			"$(printf '%s' "$SB_BROKER_BASE" | json_escape)" \
+			"$([ "${SB_BROKER:-0}" = 1 ] && echo true || echo false)"
 		if [ "$_live" = 1 ]; then
 			printf ',"live":{'
 			_first=1
@@ -1513,6 +1747,8 @@ cmd_doctor() {
 		printf '%-18s %-12s %-12s %s\n' "$_e" "$(engine_pinned_version "$_e")" \
 			"$(installed_version "$_e")" "${_b:--}"
 	done
+	printf '%-18s %-12s %-12s %s\n' "$SB_BROKER_ENGINE" remote - \
+		"$SB_BROKER_BASE (opt-in: SB_BROKER=1)"
 	if [ "$_live" = 1 ]; then
 		printf '\nlive check (only installed engines):\n'
 		for _e in $SB_ALL; do
@@ -1557,7 +1793,7 @@ sb get URL [--as text|markdown|html|links|png|pdf] [--out FILE] [--json]
   --as pdf    moli -> lightpanda              (obscura has no CLI pdf)
   --as links  obscura -> curl-impersonate
 
-  --engine E       use one engine, no escalation
+  --engine E       use one engine, no escalation (broker included)
   --min-chars N    escalate below N chars of text (default 40, 0 disables)
   --max-bytes N    cap the text embedded by --json (default 200000)
   --no-fallback    one attempt only
@@ -1566,11 +1802,19 @@ sb get URL [--as text|markdown|html|links|png|pdf] [--out FILE] [--json]
   --proxy URL      route through a proxy; passed to every engine that takes one
                    (obscura, nokk, lightpanda, moli, curl-impersonate)
 
-  exit 0 ok, 6 no output, 7 wall still up (output is the best attempt)
+  The envelope reports the origin's own answer when an engine can give it:
+  "status" is the HTTP status and "final_url" is the page actually read, so a
+  200 that is a notice page on another host is visible rather than silent. The
+  same facts are printed on stderr as a note.
+
+  exit 0 ok, 6 no output, 7 the page was refused (a bot wall, an edge
+  refusal, or a substituted page) - the best attempt is printed anyway
 
   sb get https://example.com
   sb get https://example.com --as markdown --engine obscura
   sb get https://example.com --as png --out page.png
+  sb get https://example.com --engine broker --as markdown
+  SB_BROKER=1 sb get https://example.com      # broker as the last rung
   sb get https://example.com --json | jq -r .engine,.meta.title
 EOF
 		;;
@@ -1645,6 +1889,7 @@ usage: sb <command> [args]
 
 core engines: $SB_CORE
 extra:        $SB_EXTRA
+remote:       $SB_BROKER_ENGINE (opt-in, SB_BROKER=1; no install, no key)
 
   sb get https://example.com
   sb get https://example.com --as markdown
@@ -1706,11 +1951,33 @@ WHY EACH ONE
 
      Measured on one datacenter IP, single run per site. See RESEARCH.md.
 
+THE BROKER LANE
+     broker            the platform read host (read.web.pkgforge.dev): no
+                       install, no key, Markdown with front matter. It is the
+                       first rung of the corpus's own escalation ladder and it
+                       reads pages no installed engine can, but a page read
+                       through it leaves the machine, so it is opt-in:
+
+                           sb get URL --engine broker --as markdown
+                           SB_BROKER=1 sb get URL      # last rung of the chain
+
+     The front matter is read, not ignored: upstream_status is the origin's
+     status, final_url is the page actually read, and an answer whose host is
+     not the target's is a substitution, so it is refused (exit 7) instead of
+     being returned as content. SB_BROKER_PROVIDER pins one reader.
+
 ESCALATION
      sb get starts cheap and gets expensive only when it must. A challenge
      page is recognised by the same markers the corpus used, so a wall that
      curl-impersonate cannot pass is escalated to nokk instead of being
      returned as if it were content.
+
+     Three refusals are not walls and are still not content: an edge's own
+     error page carrying a 200 ("Unable to load site", a VPN notice, an error
+     1020 body), a 403/429/52x from the origin, and an answer from a host other
+     than the one asked for. The first escalates, the second escalates, and the
+     third is reported with the final URL. A 404 is reported as a 404 and is
+     not escalated: a browser would receive the same missing page.
 
 HERMETIC
      Downloads land in \$SB_HOME/cache/dl and are checked against the pinned
@@ -1754,10 +2021,19 @@ ENVIRONMENT
      SB_CI_PROFILE     curl-impersonate profile (chrome152)
      SB_PROXY_OPT      proxy handed to every engine that takes one
                        (usually set by sb get --proxy URL, not by hand)
+     SB_BROKER         1 adds the broker lane to --as text/markdown
+     SB_BROKER_BASE    the read host (https://read.web.pkgforge.dev)
+     SB_BROKER_PROVIDER  pin one reader on the broker lane
+     SB_ATTEMPT_META   internal: where an engine wrapper reports status and
+                       final URL for the current attempt
 
 EXIT CODES
      0 ok   2 usage   3 missing dependency/platform   4 download
-     5 checksum/unpack   6 engine failed   7 wall still up   8 unsupported
+     5 checksum/unpack   6 engine failed   7 page refused   8 unsupported
+
+     "refused" is a bot wall, an edge refusal, or a substituted page: the
+     attempt is printed anyway, so a caller can see what came back.
+
 
 NOTES
      In a sandbox that denies bind(2), the CDP servers (obscura serve,
