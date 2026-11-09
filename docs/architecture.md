@@ -11,7 +11,9 @@ install              dl, install_engine, write_wrappers, install_self,
                      bootstrap, ensure_engine
 adapters             ad_fetch, ad_eval, ad_solve, ad_meta, strip_html
                      the only code that knows an engine's flags
-classification       is_wall, failed_out, verdict, chain_for
+provenance           SB_ATTEMPT_META, provenance_note, host_of
+classification       is_wall, is_errorpage, failed_out, verdict, chain_for
+remote lane          broker_url, uri_encode          the read host, no install
 commands             cmd_*                           one per verb
 dispatch             a case at the bottom of the file
 ```
@@ -28,9 +30,19 @@ adding a line, never editing logic — and `--latest` prints the line for you.
 
 **Calibration, not "$?".** Four of the five engines exit `0` after printing a
 navigation error. `verdict()` therefore reads the output: a structured error
-key, a known failure phrase, a wall marker, or a byte count. This is the
-single most important function for an agent, because the alternative is
-handing an agent an error page that looks like content.
+key, a known failure phrase, a wall marker, an edge refusal, or a byte
+count. This is the single most important function for an agent, because the
+alternative is handing an agent an error page that looks like content.
+
+**A 200 is not evidence.** A page can arrive as a 200 with a challenge in it,
+with the edge's own error page in it, or from a host that is not the one asked
+for. The first is `is_wall()`, the second `is_errorpage()` - a marker near the
+start of a body too short to be a page, so a document *about* the string is
+not mistaken for it - and the third is the provenance note. The engine writes
+`http_code<TAB>url_effective<TAB>redirects` into `$SB_ATTEMPT_META`; `sb get`
+reports status and final URL in the envelope and on stderr. A `403`/`429`/`52x`
+escalates, a plain `404` does not, since a browser would receive the same
+missing page.
 
 **Subshells instead of `local`.** POSIX `sh` has no `local`, and a callee
 overwrites the caller's `_url`, `_pf` etc. Every function that has scratch
@@ -60,6 +72,20 @@ would pass even if the binary had been swapped afterwards.
 sha256 and a paste-ready manifest line. Anything else would be a tool that
 silently installs unverified code.
 
+## The one remote lane
+
+`broker` is not an engine: it is the platform read host the corpus measures
+with, and it is in `SB_CAPS` only so `sb engines` can say what it can do.
+`ad_fetch` reaches it before the `engine_bin` lookup, since there is no binary,
+and `ensure_engine` answers for it with `have curl`. It joins the `text` and
+`markdown` chains only when `SB_BROKER=1`, because a page read through it
+leaves the machine, and it writes its own provenance (front-matter
+`upstream_status` and `final_url`) into the same `$SB_ATTEMPT_META` file the
+local engines use, so classification needs no second code path. Its
+`final_url` host is the one case where another host is a refusal rather than a
+note: a read answer naming a host other than the target's is a substitution,
+not the page that was asked for.
+
 ## Deliberate non-goals
 
 * **No daemon, no server, no state machine.** Every command is one process that
@@ -72,7 +98,9 @@ silently installs unverified code.
   text rather than pretending.
 * **No silent retries.** An attempt is one attempt with a timeout. Escalation
   is visible on stderr, and `attempts[]` in the JSON records why each engine
-  was passed over.
+  was passed over, with the status and final URL it reported.
+* **No cloud by default.** The one remote lane is opt-in. Everything else is a
+  binary in `$SB_HOME` and a request straight to the target.
 
 ## Adding an engine
 
