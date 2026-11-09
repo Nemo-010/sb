@@ -197,6 +197,19 @@ section "clean install"
 		if [ -x "$SB_HOME/bin/$e" ]; then ok "wrapper $SB_HOME/bin/$e"; else no "wrapper $e missing"; fi
 	done
 
+	# the install must leave a usable sb on PATH, or an agent that used the
+	# one-line start has engines but no command
+	if [ -x "$SB_HOME/bin/sb" ] && "$SB_HOME/bin/sb" version >/dev/null 2>&1; then
+		ok "install leaves $SB_HOME/bin/sb runnable"
+	else
+		no "install did not leave a runnable sb"
+	fi
+	if [ "$("$SB_HOME/bin/sb" version 2>/dev/null | head -n 1)" = "sb $("$SB_HOME/bin/sb" version 2>/dev/null | sed -n '1s/^sb //p')" ]; then
+		ok "installed sb runs itself"
+	else
+		no "installed sb cannot report its own version"
+	fi
+
 	run $SB verify
 	expect_rc 0 "verify after install"
 

@@ -11,8 +11,15 @@ configures and drives the four tools that came out on top of a 16-tool,
 curl -fsSL https://raw.githubusercontent.com/Nemo-010/sb/main/sb | sh -s -- get https://example.com
 ```
 
-That is the whole start-up: it installs what it needs, then fetches the page
-and prints its text. Nothing is patched, nothing is configured by hand.
+That is the whole start-up: it installs what it needs, fetches the page, prints
+its text, and leaves `sb` at `$SB_HOME/bin/sb` for next time. Nothing is
+patched, nothing is configured by hand.
+
+```sh
+export PATH="$HOME/.local/share/sb/bin:$PATH"    # or: eval "$(sb env)"
+sb doctor                                         # what is installed, is it healthy
+sb get https://example.com --json                 # machine-readable envelope
+```
 
 ```
 $ sb get https://example.com
@@ -202,6 +209,7 @@ not re-downloaded (both cases are covered by the test suite). `sb doctor`,
 | `SB_SESSION` | named nokk session for the automatic solver pass |
 | `SB_CI_PROFILE` | curl-impersonate profile (default `chrome152`) |
 | `SB_SELF_URL` | where `sb update --self` fetches from |
+| `SB_AUTO_INSTALL_SELF` | `0` stops the one-line start from fetching a copy of `sb` |
 
 Offline installs work: drop the release assets into `$SB_HOME/cache/dl/`
 yourself and `sb install` will verify and use them.
@@ -211,12 +219,12 @@ yourself and `sb install` will verify and use them.
 ```sh
 ./test.sh             # 43 offline checks, no network
 ./test.sh --live      # + real fetches through every engine (52)
-./test.sh --install   # + a clean install into a throwaway prefix (68)
+./test.sh --install   # + a clean install into a throwaway prefix (70)
 ```
 
 Each run gets its own `SB_HOME` under a temp dir and removes it on exit; the
-real one is never touched. `--install` also verifies idempotency, hermeticity
-and that a tampered binary is detected.
+real one is never touched. `--install` also verifies idempotency, hermeticity,
+that the install leaves a runnable `sb`, and that a tampered binary is detected.
 
 ## Notes and limits
 
